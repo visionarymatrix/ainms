@@ -1,0 +1,31 @@
+server:
+  host: "0.0.0.0"
+  port: 8440
+
+postgres:
+  host: "localhost"
+  port: 5440
+  user: "ainms"
+  password: "ainms_dev_password"
+  db: "ainms"
+  ssl_mode: "disable"
+
+clickhouse:
+  host: "localhost"
+  port: 8123
+  user: "default"
+  password: ""
+  db: "ainms"
+
+redis:
+  host: "localhost"
+  port: 6390
+  password: ""
+  db: 0
+
+minio:
+  endpoint: "localhost:9101"
+  access_key: "ainms_minio"
+  secret_key: "ainms_minio_password"
+  bucket: "ainms-screenshots"
+  secure: false
