@@ -1,3 +1,7 @@
+#[cfg(target_os = "windows")]
+#[macro_use]
+extern crate windows_service;
+
 pub mod platform;
 
 pub use platform::{install, uninstall, start, stop, run_service};

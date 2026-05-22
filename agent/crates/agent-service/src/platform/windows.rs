@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use tracing::{error, info};
 
 use windows_service::service::{
@@ -60,13 +60,13 @@ pub fn uninstall() -> Result<()> {
         .open_service(SERVICE_NAME, service_access)
         .context("Service not found. Is it installed?")?;
 
-    svc.delete().context("Failed to mark service for deletion")?;
-
     let status = svc.query_status()?;
     if status.current_state != ServiceState::Stopped {
         info!("Service is running, stopping...");
         svc.stop()?;
     }
+
+    svc.delete().context("Failed to mark service for deletion")?;
     drop(svc);
 
     info!("Service '{}' uninstalled", SERVICE_NAME);
@@ -82,7 +82,7 @@ pub fn start() -> Result<()> {
         .open_service(SERVICE_NAME, service_access)
         .context("Service not found. Is it installed?")?;
 
-    svc.start(&[] as Vec<OsString>)?;
+    svc.start(&[] as &[OsString])?;
     info!("Service '{}' started", SERVICE_NAME);
     Ok(())
 }
