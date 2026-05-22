@@ -1,0 +1,61 @@
+# Backend
+backend/server
+backend/tmp/
+backend/*.exe
+backend/*.test
+backend/*.prof
+
+# Go
+*.test
+*.prof
+coverage.out
+coverage.html
+
+# Admin
+admin/node_modules/
+admin/.next/
+admin/out/
+admin/build/
+admin/dist/
+
+# Agent
+agent/target/
+agent/Cargo.lock
+
+# Binaries
+bin/
+
+# Systemd service files (deployment-specific)
+*.service
+
+# CodeGraph
+.codegraph/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Docker volumes
+pgdata/
+chdata/
+redisdata/
+miniodata/
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+start-admin.sh
