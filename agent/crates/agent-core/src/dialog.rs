@@ -225,3 +225,78 @@ fn ask_stdout(title: &str, message: &str) -> Result<DialogAnswer> {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_escape_ps_empty() {
+        assert_eq!(escape_ps(""), "");
+    }
+
+    #[test]
+    fn test_escape_ps_no_quotes() {
+        assert_eq!(
+            escape_ps("Hello World"),
+            "Hello World"
+        );
+    }
+
+    #[test]
+    fn test_escape_ps_single_quote() {
+        assert_eq!(
+            escape_ps("It's working"),
+            "It''s working"
+        );
+    }
+
+    #[test]
+    fn test_escape_ps_multiple_quotes() {
+        assert_eq!(
+            escape_ps("Don't 'stop' me now"),
+            "Don''t ''stop'' me now"
+        );
+    }
+
+    #[test]
+    fn test_dialog_answer_yes() {
+        let ans = DialogAnswer::Yes;
+        assert!(matches!(ans, DialogAnswer::Yes));
+    }
+
+    #[test]
+    fn test_dialog_answer_no() {
+        let ans = DialogAnswer::No;
+        assert!(matches!(ans, DialogAnswer::No));
+    }
+
+    #[test]
+    fn test_dialog_answer_clone() {
+        let a = DialogAnswer::Yes;
+        let b = a.clone();
+        assert!(matches!(b, DialogAnswer::Yes));
+    }
+
+    #[test]
+    fn test_escape_ps_special_chars() {
+        assert_eq!(
+            escape_ps("Device 'AINMS' Agent"),
+            "Device ''AINMS'' Agent"
+        );
+    }
+
+    #[test]
+    fn test_escape_ps_long_string() {
+        let input = "Lorem 'ipsum' dolor 'sit' amet";
+        let expected = "Lorem ''ipsum'' dolor ''sit'' amet";
+        assert_eq!(escape_ps(input), expected);
+    }
+
+    #[test]
+    fn test_dialog_answer_debug() {
+        let yes = DialogAnswer::Yes;
+        let no = DialogAnswer::No;
+        assert!(format!("{:?}", yes).contains("Yes"));
+        assert!(format!("{:?}", no).contains("No"));
+    }
+}
