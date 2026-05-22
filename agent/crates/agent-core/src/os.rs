@@ -179,14 +179,16 @@ mod windows {
     }
 
     pub fn os_version() -> String {
-        let output = Command::new("cmd")
-            .args(["/C", "wmic os get caption /value"])
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                "[System.Environment]::OSVersion.VersionString; (Get-CimInstance Win32_OperatingSystem).Caption"])
             .output();
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
-                if line.starts_with("Caption=") {
-                    return line.trim_start_matches("Caption=").trim().to_string();
+                let line = line.trim();
+                if line.starts_with("Microsoft Windows") {
+                    return line.to_string();
                 }
             }
         }
@@ -247,174 +249,153 @@ mod windows {
     }
 
     pub fn cpu_info() -> String {
-        let output = Command::new("cmd")
-            .args(["/C", "wmic cpu get Name,NumberOfCores /format:list"])
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                "Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores | ConvertTo-Json"])
             .output();
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut name = String::new();
-            let mut cores = String::new();
-            for line in stdout.lines() {
-                let line = line.trim();
-                if line.starts_with("Name=") {
-                    name = line.trim_start_matches("Name=").trim().to_string();
-                } else if line.starts_with("NumberOfCores=") {
-                    cores = line
-                        .trim_start_matches("NumberOfCores=")
-                        .trim()
-                        .to_string();
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                let cpus = match json {
+                    serde_json::Value::Array(ref arr) => arr.clone(),
+                    ref obj @ serde_json::Value::Object(_) if obj.get("Name").is_some() => vec![json.clone()],
+                    _ => vec![],
+                };
+                if let Some(cpu) = cpus.first() {
+                    let name = cpu.get("Name").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                    let cores = cpu.get("NumberOfCores").and_then(|v| v.as_i64()).unwrap_or(0);
+                    return format!("{} ({} cores)", name.trim(), cores);
                 }
-            }
-            if !name.is_empty() {
-                return format!("{} ({} cores)", name, cores);
             }
         }
         "Unknown CPU".to_string()
     }
 
     pub fn ram_info() -> String {
-        let output = Command::new("cmd")
-            .args(["/C", "wmic computersystem get TotalPhysicalMemory /value"])
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"])
             .output();
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if line.starts_with("TotalPhysicalMemory=") {
-                    let bytes_str = line
-                        .trim_start_matches("TotalPhysicalMemory=")
-                        .trim();
-                    if let Ok(bytes) = bytes_str.parse::<u64>() {
-                        let gb = bytes / 1024 / 1024 / 1024;
-                        return format!("{} GB", gb);
-                    }
-                }
+            if let Ok(bytes) = stdout.trim().parse::<u64>() {
+                let gb = bytes / 1024 / 1024 / 1024;
+                return if gb > 0 { format!("{} GB", gb) } else { format!("{} MB", bytes / 1024 / 1024) };
             }
         }
         "Unknown RAM".to_string()
     }
 
     pub fn disk_info() -> String {
-        let output = Command::new("cmd")
-            .args(["/C", "wmic logicaldisk where \"DeviceID='C:'\" get Size,FreeSpace /value"])
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                "Get-CimInstance Win32_LogicalDisk -Filter \"DeviceID='C:'\" | Select-Object Size,FreeSpace | ConvertTo-Json"])
             .output();
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut total_bytes: f64 = 0.0;
-            let mut free_bytes: f64 = 0.0;
-            for line in stdout.lines() {
-                let line = line.trim();
-                if line.starts_with("Size=") {
-                    total_bytes = line
-                        .trim_start_matches("Size=")
-                        .trim()
-                        .parse()
-                        .unwrap_or(0.0);
-                } else if line.starts_with("FreeSpace=") {
-                    free_bytes = line
-                        .trim_start_matches("FreeSpace=")
-                        .trim()
-                        .parse()
-                        .unwrap_or(0.0);
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                let total = json.get("Size").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let free = json.get("FreeSpace").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                if total > 0.0 {
+                    let total_gb = total / 1073741824.0;
+                    let free_gb = free / 1073741824.0;
+                    return format!("{:.0} GB total, {:.0} GB available", total_gb, free_gb);
                 }
-            }
-            if total_bytes > 0.0 {
-                let total_gb = total_bytes / 1024.0 / 1024.0 / 1024.0;
-                let free_gb = free_bytes / 1024.0 / 1024.0 / 1024.0;
-                return format!("{:.0} GB total, {:.0} GB available", total_gb, free_gb);
             }
         }
         "Unknown disk".to_string()
     }
 
     pub fn mac_addresses() -> String {
-        let output = Command::new("cmd")
-            .args(["/C", "wmic nic where \"NetEnabled=true\" get MACAddress,Name /format:list"])
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                "Get-CimInstance Win32_NetworkAdapter -Filter 'NetEnabled=true AND PhysicalAdapter=true' | Select-Object Name,MACAddress | ConvertTo-Json"])
             .output();
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut macs = Vec::new();
-            let mut current_name = String::new();
-            let mut current_mac = String::new();
-            for line in stdout.lines() {
-                let line = line.trim();
-                if line.starts_with("Name=") {
-                    current_name = line.trim_start_matches("Name=").trim().to_string();
-                } else if line.starts_with("MACAddress=") {
-                    current_mac = line
-                        .trim_start_matches("MACAddress=")
-                        .trim()
-                        .to_string();
-                }
-                if !current_name.is_empty() && !current_mac.is_empty() {
-                    // Skip virtual/loopback adapters
-                    let lower = current_name.to_lowercase();
-                    if lower.contains("virtual")
-                        || lower.contains("hyper-v")
-                        || lower.contains("vpn")
-                        || lower.contains("tunnel")
-                        || lower.contains("loopback")
-                        || lower.contains("bluetooth")
-                    {
-                        current_name.clear();
-                        current_mac.clear();
-                        continue;
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                let mut macs = Vec::new();
+                let adapters = match json {
+                    serde_json::Value::Array(arr) => arr,
+                    serde_json::Value::Object(ref obj) if obj.contains_key("Name") => vec![json],
+                    _ => vec![],
+                };
+                for adapter in &adapters {
+                    let name = adapter.get("Name").and_then(|v| v.as_str()).unwrap_or("");
+                    let mac = adapter.get("MACAddress").and_then(|v| v.as_str()).unwrap_or("");
+                    if !name.is_empty() && !mac.is_empty() {
+                        let lower = name.to_lowercase();
+                        if lower.contains("virtual") || lower.contains("hyper-v")
+                            || lower.contains("vpn") || lower.contains("tunnel")
+                            || lower.contains("bluetooth")
+                        {
+                            continue;
+                        }
+                        macs.push(format!("{}={}", name, mac.replace(':', "-")));
                     }
-                    macs.push(format!("{}={}", current_name, current_mac));
-                    current_name.clear();
-                    current_mac.clear();
+                }
+                if !macs.is_empty() {
+                    return macs.join(", ");
                 }
             }
-            return macs.join(", ");
         }
         "unknown".to_string()
     }
 
     pub fn ip_addresses() -> String {
-        let output = Command::new("cmd")
-            .args(["/C", "ipconfig"])
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                "(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=true').IPAddress | ConvertTo-Json"])
             .output();
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut ips = Vec::new();
-            for line in stdout.lines() {
-                let line = line.trim();
-                if line.starts_with("IPv4 Address") || line.starts_with("IPv4-Version") {
-                    if let Some(addr_part) = line.split(':').nth(1) {
-                        let addr = addr_part.trim().trim_end_matches("(Preferred)");
-                        if !addr.starts_with("192.168.") && !addr.starts_with("172.16.") {
-                            ips.push(addr.to_string());
-                        }
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                let ips: Vec<&str> = match json {
+                    serde_json::Value::String(ref s) => {
+                        if !s.starts_with("169.254.") { vec![s.as_str()] } else { vec![] }
                     }
+                    serde_json::Value::Array(ref arr) => {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .filter(|ip| !ip.starts_with("169.254.") && !ip.contains(':'))
+                            .collect()
+                    }
+                    _ => vec![],
+                };
+                if !ips.is_empty() {
+                    return ips.join(", ");
                 }
             }
-            return ips.join(", ");
         }
         "unknown".to_string()
     }
 
     pub fn collect_processes() -> Vec<(String, i32, String)> {
-        let output = Command::new("cmd")
-            .args(["/C", "tasklist /FO CSV /NH"])
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                "Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -or $_.Name -in @('explorer','svchost','lsass','csrss','smss','winlogon','services','spoolsv') } | Select-Object ProcessName,Id,Path | ConvertTo-Json"])
             .output();
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut procs = Vec::new();
-            for line in stdout.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                // Format: "name","pid","session","session#","mem"
-                let parts: Vec<&str> = line.splitn(5, ',').collect();
-                if parts.len() >= 2 {
-                    let name = parts[0].trim_matches('"').trim().to_string();
-                    let pid_str = parts[1].trim_matches('"').trim();
-                    if let Ok(pid) = pid_str.parse::<i32>() {
-                        procs.push((name, pid, String::new()));
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                let procs = match json {
+                    serde_json::Value::Array(ref arr) => arr.clone(),
+                    ref obj @ serde_json::Value::Object(_) if obj.get("ProcessName").is_some() => vec![json.clone()],
+                    _ => vec![],
+                };
+                let mut result = Vec::new();
+                for proc in &procs {
+                    let name = proc.get("ProcessName").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let pid = proc.get("Id").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                    let path = proc.get("Path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if !name.is_empty() && pid > 0 {
+                        result.push((name, pid, path));
                     }
                 }
+                if !result.is_empty() {
+                    return result;
+                }
             }
-            return procs;
         }
         Vec::new()
     }
