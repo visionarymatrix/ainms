@@ -425,20 +425,20 @@ export default function DevicesPage() {
 
                               <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs text-muted-foreground">
                                 {device.cpu_info && (
-                                  <div className="flex items-center gap-1">
-                                    <Cpu className="h-3 w-3" />
-                                    <span>{device.cpu_info}</span>
+                                  <div className="col-span-2 flex items-start gap-1">
+                                    <Cpu className="h-3 w-3 mt-0.5 shrink-0" />
+                                    <span className="break-words">{device.cpu_info}</span>
                                   </div>
                                 )}
                                 {device.ram_info && (
                                   <div className="flex items-center gap-1">
-                                    <MemoryStick className="h-3 w-3" />
+                                    <MemoryStick className="h-3 w-3 shrink-0" />
                                     <span>{device.ram_info}</span>
                                   </div>
                                 )}
                                 {device.disk_info && (
                                   <div className="flex items-center gap-1">
-                                    <HardDrive className="h-3 w-3" />
+                                    <HardDrive className="h-3 w-3 shrink-0" />
                                     <span>{device.disk_info}</span>
                                   </div>
                                 )}
@@ -645,29 +645,29 @@ export default function DevicesPage() {
                                     </div>
                                   )}
                                   {device.cpu_info && (
-                                    <div>
+                                    <div className="col-span-2 md:col-span-1">
                                       <span className="text-muted-foreground block mb-1">CPU</span>
-                                      <div className="flex items-center gap-1">
-                                        <Cpu className="h-4 w-4 text-muted-foreground" />
-                                        <span>{device.cpu_info}</span>
+                                      <div className="flex items-start gap-2">
+                                        <Cpu className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                                        <span className="break-words text-sm">{device.cpu_info}</span>
                                       </div>
                                     </div>
                                   )}
                                   {device.ram_info && (
                                     <div>
                                       <span className="text-muted-foreground block mb-1">RAM</span>
-                                      <div className="flex items-center gap-1">
-                                        <MemoryStick className="h-4 w-4 text-muted-foreground" />
-                                        <span>{device.ram_info}</span>
+                                      <div className="flex items-center gap-2">
+                                        <MemoryStick className="h-4 w-4 text-muted-foreground shrink-0" />
+                                        <span className="text-sm">{device.ram_info}</span>
                                       </div>
                                     </div>
                                   )}
                                   {device.disk_info && (
                                     <div>
                                       <span className="text-muted-foreground block mb-1">Disk</span>
-                                      <div className="flex items-center gap-1">
-                                        <HardDrive className="h-4 w-4 text-muted-foreground" />
-                                        <span>{device.disk_info}</span>
+                                      <div className="flex items-center gap-2">
+                                        <HardDrive className="h-4 w-4 text-muted-foreground shrink-0" />
+                                        <span className="text-sm">{device.disk_info}</span>
                                       </div>
                                     </div>
                                   )}
