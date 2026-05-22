@@ -1,0 +1,146 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrollmentRequest {
+    pub employee_id: String,
+    pub company_id: String,
+    pub hostname: String,
+    pub os_type: String,
+    pub os_version: String,
+    pub fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_info: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ram_info: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_info: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac_addresses: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip_addresses: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmployeeInfo {
+    pub id: String,
+    pub company_id: String,
+    pub employee_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RulesInfo {
+    #[serde(default)]
+    pub app_classifications: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub alert_rules: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub policy: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrollmentResponse {
+    pub device_id: String,
+    pub employee_id: String,
+    #[serde(default)]
+    pub employee: Option<EmployeeInfo>,
+    pub device_token: String,
+    #[serde(default)]
+    pub rules: Option<RulesInfo>,
+    #[serde(default)]
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppUsageEventMeta {
+    pub app_name: String,
+    pub window_title: String,
+    pub process_name: String,
+    pub process_id: i32,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub duration_sec: f64,
+    pub classification: String,
+    pub confidence: f64,
+    pub role_id: Option<String>,
+    pub device_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppUsageSummary {
+    pub device_id: String,
+    pub app_name: String,
+    pub total_duration_sec: f64,
+    pub session_count: u64,
+    pub productive_duration_sec: f64,
+    pub unproductive_duration_sec: f64,
+    pub neutral_duration_sec: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkEventRequest {
+    pub device_id: String,
+    pub summary: AppUsageSummary,
+    pub metadata: Vec<AppUsageEventMeta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriorityEventRequest {
+    pub device_id: String,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+}
+
+// Legacy types kept for compatibility with agent-comms
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppUsageEvent {
+    pub app_name: String,
+    pub window_title: String,
+    pub process_name: String,
+    pub process_id: u32,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub duration_sec: f64,
+    pub classification: String,
+    pub confidence: f64,
+    pub device_id: String,
+    pub employee_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PopupEvent {
+    pub explanation: String,
+    pub popup_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriorityEvent {
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    pub device_id: String,
+    pub employee_id: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenshotResult {
+    pub device_id: String,
+    pub employee_id: String,
+    pub timestamp: DateTime<Utc>,
+    pub file_path: String,
+    pub classification: String,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TamperEvent {
+    pub device_id: String,
+    pub employee_id: String,
+    pub timestamp: DateTime<Utc>,
+    pub event_type: String,
+    pub details: String,
+}
