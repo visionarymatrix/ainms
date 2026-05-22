@@ -9,3 +9,6 @@ serde = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 agent-proto = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"

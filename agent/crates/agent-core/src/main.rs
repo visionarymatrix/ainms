@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::time::{interval, sleep};
@@ -31,6 +31,18 @@ const UPLOAD_RETRY_DELAY_SECS: u64 = 5;
 
 // ── CLI / Config ────────────────────────────────────────────────────────────
 
+#[derive(Subcommand, Debug)]
+enum ServiceCommand {
+    #[command(about = "Install the agent as a system service (requires admin/root)")]
+    Install,
+    #[command(about = "Uninstall the agent system service (requires admin/root)")]
+    Uninstall,
+    #[command(about = "Start the agent system service")]
+    Start,
+    #[command(about = "Stop the agent system service")]
+    Stop,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "ainms-agent", version = "0.2.0", about = "AINMS Agent")]
 struct Args {
@@ -51,6 +63,12 @@ struct Args {
 
     #[arg(long)]
     config: Option<String>,
+
+    #[arg(long, hide = true)]
+    run_as_service: bool,
+
+    #[command(subcommand)]
+    service: Option<ServiceCommand>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -793,13 +811,46 @@ async fn send_bulk_event(
 
 // ── Main ────────────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let args = Args::parse();
+
+    // Handle service management commands first (no tokio runtime needed)
+    if let Some(ref cmd) = args.service {
+        match cmd {
+            ServiceCommand::Install => return agent_service::install(),
+            ServiceCommand::Uninstall => return agent_service::uninstall(),
+            ServiceCommand::Start => return agent_service::start(),
+            ServiceCommand::Stop => return agent_service::stop(),
+        }
+    }
+
+    // Windows service mode: hand off to SCM
+    if args.run_as_service {
+        #[cfg(target_os = "windows")]
+        {
+            agent_service::set_agent_runner(Box::new(|| {
+                let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+                rt.block_on(run_agent());
+            }));
+            return agent_service::run_service();
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            return agent_service::run_service();
+        }
+    }
+
+    // Normal CLI mode
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(run_agent())
+}
+
+async fn run_agent() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    info!("AINMS Agent v0.1.0 starting...");
+    info!("AINMS Agent v0.2.0 starting...");
 
     let args = Args::parse();
     let cfg = resolve_config(&args);

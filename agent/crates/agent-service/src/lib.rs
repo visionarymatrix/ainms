@@ -1,22 +1,6 @@
 pub mod platform;
 
-pub struct AgentService;
+pub use platform::{install, uninstall, start, stop, run_service};
 
-impl AgentService {
-    pub fn new() -> Self {
-        // TODO: implement service initialization
-        AgentService
-    }
-
-    pub async fn install(&self) -> anyhow::Result<()> {
-        // TODO: implement service install
-        println!("TODO: implement AgentService::install");
-        Ok(())
-    }
-
-    pub async fn uninstall(&self) -> anyhow::Result<()> {
-        // TODO: implement service uninstall
-        println!("TODO: implement AgentService::uninstall");
-        Ok(())
-    }
-}
+#[cfg(target_os = "windows")]
+pub use platform::set_agent_runner;
