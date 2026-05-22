@@ -1,4 +1,5 @@
 mod config;
+mod dialog;
 mod os;
 mod rule_engine;
 
