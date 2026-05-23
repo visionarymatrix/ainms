@@ -1,9 +1,12 @@
 use std::ffi::OsString;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use windows_service::service::{
     ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
@@ -14,6 +17,63 @@ use windows_service::service_dispatcher;
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 const SERVICE_NAME: &str = "AINMSAgent";
+const INSTALL_DIR: &str = r"C:\Program Files\AINMS\Agent";
+const BIN_NAME: &str = "agent-core.exe";
+
+fn installed_bin_path() -> String {
+    format!(r"{}\{}", INSTALL_DIR, BIN_NAME)
+}
+
+/// Copy the current binary to the install directory, matching Linux/macOS behavior.
+fn copy_binary_to_install_dir() -> Result<()> {
+    let src = std::env::current_exe().context("Failed to get current executable path")?;
+    let installed = installed_bin_path();
+    let dst = Path::new(&installed);
+
+    fs::create_dir_all(INSTALL_DIR)
+        .with_context(|| format!("Failed to create install directory {}", INSTALL_DIR))?;
+
+    fs::copy(&src, dst).with_context(|| {
+        format!(
+            "Failed to copy binary from {} to {}",
+            src.display(),
+            dst.display()
+        )
+    })?;
+
+    info!("Binary installed to {}", installed_bin_path());
+    Ok(())
+}
+
+/// Configure service recovery options via sc.exe.
+///
+/// The windows-service crate doesn't expose recovery actions, so we use sc.exe:
+/// - First failure:  restart immediately (0s delay)
+/// - Second failure: restart after 5 seconds
+/// - Subsequent:     restart after 30 seconds
+/// - Reset count:    after 24 hours (86400 seconds)
+fn configure_service_recovery() -> Result<()> {
+    let output = Command::new("sc.exe")
+        .args([
+            "failure",
+            SERVICE_NAME,
+            "reset=",
+            "86400",
+            "actions=",
+            "restart/0/restart/5000/restart/30000",
+        ])
+        .output()
+        .context("Failed to run sc.exe failure")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!("sc.exe failure config warning: {}", stderr.trim());
+        // Non-fatal: service works without recovery config
+    } else {
+        info!("Service recovery configured (restart on failure)");
+    }
+    Ok(())
+}
 
 static AGENT_RUNNER: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
 
@@ -22,7 +82,11 @@ pub fn set_agent_runner(runner: Box<dyn Fn() + Send + Sync>) {
 }
 
 pub fn install() -> Result<()> {
-    let exe_path = std::env::current_exe().context("Failed to get current executable path")?;
+    // Copy binary to Program Files (same pattern as Linux/macOS)
+    copy_binary_to_install_dir()?;
+
+    let installed = installed_bin_path();
+    let exe_path = Path::new(&installed).to_path_buf();
 
     let manager_access = ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE;
     let service_manager = ServiceManager::local_computer(None::<&str>, manager_access)
@@ -46,7 +110,15 @@ pub fn install() -> Result<()> {
         .context("Failed to create service. Already installed?")?;
     svc.set_description("AINMS workplace accountability agent")?;
 
-    info!("Service '{}' installed successfully", SERVICE_NAME);
+    // Configure auto-restart on failure (matches architecture spec)
+    configure_service_recovery()?;
+
+    info!(
+        "Service '{}' installed successfully. Binary: {}, Install dir: {}",
+        SERVICE_NAME,
+        installed_bin_path(),
+        INSTALL_DIR
+    );
     Ok(())
 }
 
@@ -68,6 +140,17 @@ pub fn uninstall() -> Result<()> {
 
     svc.delete().context("Failed to mark service for deletion")?;
     drop(svc);
+
+    // Remove install directory and binary
+    let installed = installed_bin_path();
+    if Path::new(&installed).exists() {
+        fs::remove_file(&installed)
+            .with_context(|| format!("Failed to remove {}", installed))?;
+    }
+    if Path::new(INSTALL_DIR).exists() {
+        // Try to remove the directory; may fail if config file still exists
+        let _ = fs::remove_dir(INSTALL_DIR);
+    }
 
     info!("Service '{}' uninstalled", SERVICE_NAME);
     Ok(())
