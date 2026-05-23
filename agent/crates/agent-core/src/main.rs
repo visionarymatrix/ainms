@@ -1,6 +1,6 @@
 mod config;
 mod dialog;
-mod os;
+pub(crate) mod os;
 mod rule_engine;
 
 use std::collections::HashMap;
@@ -695,12 +695,40 @@ async fn collect_loop(
         let new_cache = agent_collectors::build_cpu_cache(&procs);
         cpu_cache = Some(new_cache);
 
+        let mut process_events = Vec::new();
+        for proc_info in &procs {
+            let (classification, confidence) = classify_process(&proc_info.name);
+            let window_title = if proc_info.cmdline.is_empty() {
+                proc_info.name.clone()
+            } else {
+                format!("{} - {}", proc_info.name, proc_info.cmdline)
+            };
+            process_events.push(AppUsageEventMeta {
+                app_name: proc_info.name.clone(),
+                window_title,
+                process_name: proc_info.name.clone(),
+                process_id: proc_info.pid,
+                start_time: now,
+                end_time: now,
+                duration_sec: proc_info.cpu_percent,
+                classification,
+                confidence,
+                role_id: None,
+                device_id: String::new(),
+            });
+        }
+
         {
             let mut s = state.lock().await;
             for ev in &mut flush_events {
                 ev.device_id = s.device_id.clone();
             }
             s.push_events(flush_events);
+
+            for ev in &mut process_events {
+                ev.device_id = s.device_id.clone();
+            }
+            s.push_events(process_events);
 
             if !procs.is_empty() {
                 let app_summary: Vec<String> = procs.iter().take(5).map(|p| format!("{}({})", p.name, p.pid)).collect();

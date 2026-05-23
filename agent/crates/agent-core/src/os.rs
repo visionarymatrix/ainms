@@ -1,5 +1,5 @@
 #[cfg(target_os = "linux")]
-mod linux {
+pub mod linux {
     use sha2::{Digest, Sha256};
 
     pub fn os_type() -> String {
