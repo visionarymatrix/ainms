@@ -1,0 +1,16 @@
+# AINMS Agent Configuration
+# Copy this template and fill in your values.
+# The installer (install-ainms-agent.ps1) generates this file automatically.
+
+# Employee identifier assigned by HR/admin portal
+employee_id = "unknown"
+
+# Company ID (UUID format, from admin portal)
+company_id = "unknown"
+
+# AINMS server endpoint
+server = "http://173.249.47.143:8440"
+
+# Service account credentials for agent authentication
+auth_email = "superadmin@ainms.io"
+auth_password = "changeme"
