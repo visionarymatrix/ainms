@@ -120,6 +120,9 @@ func main() {
 			r.Post("/events/priority", handler.PriorityEvent(eventRepo))
 			r.Post("/events/popup", handler.PopupEvent(eventRepo))
 
+			r.Get("/devices/{deviceID}/usage-summaries", handler.GetDeviceUsageSummaries(eventRepo))
+			r.Get("/devices/{deviceID}/events", handler.GetDeviceEvents(eventRepo))
+
 			r.Get("/devices/status", handler.DeviceFleetStatus(enrollmentSvc))
 			r.Post("/screenshot/request", handler.RequestScreenshot(nil))
 			r.Post("/screenshot/upload", handler.UploadScreenshot(nil))

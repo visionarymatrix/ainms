@@ -2,9 +2,11 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/ainms/gateway/internal/domain"
 	"github.com/ainms/gateway/internal/repository/clickhouse"
+	"github.com/go-chi/chi/v5"
 )
 
 func BulkEvents(svc *clickhouse.EventRepo) http.HandlerFunc {
@@ -48,6 +50,44 @@ func PriorityEvent(svc *clickhouse.EventRepo) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+}
+
+func GetDeviceUsageSummaries(svc *clickhouse.EventRepo) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		deviceID := chi.URLParam(r, "deviceID")
+		if deviceID == "" {
+			writeError(w, http.StatusBadRequest, "device_id is required")
+			return
+		}
+		summaries, err := svc.GetAppUsageSummaries(r.Context(), []string{deviceID})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, summaries)
+	}
+}
+
+func GetDeviceEvents(svc *clickhouse.EventRepo) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		deviceID := chi.URLParam(r, "deviceID")
+		if deviceID == "" {
+			writeError(w, http.StatusBadRequest, "device_id is required")
+			return
+		}
+		limit := 1000
+		if l := r.URL.Query().Get("limit"); l != "" {
+			if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 5000 {
+				limit = v
+			}
+		}
+		events, err := svc.GetEventsByDevice(r.Context(), deviceID, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, events)
 	}
 }
 

@@ -113,6 +113,30 @@ func (r *EventRepo) GetAppUsageSummaries(ctx context.Context, deviceIDs []string
 	return summaries, rows.Err()
 }
 
+func (r *EventRepo) GetEventsByDevice(ctx context.Context, deviceID string, limit int) ([]domain.AppUsageEventMeta, error) {
+	query := `SELECT device_id, app_name, window_title, process_name, process_id, 
+		start_time, end_time, duration_sec, classification, confidence
+		FROM app_usage_events WHERE device_id = $1
+		ORDER BY created_at DESC LIMIT $2`
+
+	rows, err := r.pgPool.Query(ctx, query, deviceID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get events: %w", err)
+	}
+	defer rows.Close()
+
+	events := make([]domain.AppUsageEventMeta, 0)
+	for rows.Next() {
+		var e domain.AppUsageEventMeta
+		if err := rows.Scan(&e.DeviceID, &e.AppName, &e.WindowTitle, &e.ProcessName,
+			&e.ProcessID, &e.StartTime, &e.EndTime, &e.DurationSec, &e.Classification, &e.Confidence); err != nil {
+			return nil, fmt.Errorf("scan event: %w", err)
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
 func (r *EventRepo) updateHeartbeat(ctx context.Context, deviceID uuid.UUID) error {
 	_, err := r.pgPool.Exec(ctx, `UPDATE devices SET last_heartbeat = NOW(), updated_at = NOW() WHERE id = $1`, deviceID)
 	return err
