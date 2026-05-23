@@ -144,3 +144,22 @@ pub struct TamperEvent {
     pub event_type: String,
     pub details: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdlePeriod {
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub duration_sec: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppSession {
+    pub app_name: String,
+    pub window_title: String,
+    pub process_name: String,
+    pub process_id: i32,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub duration_sec: f64,
+    pub idle_during: bool,
+}

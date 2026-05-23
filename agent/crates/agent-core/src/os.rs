@@ -137,6 +137,7 @@ mod linux {
         "unknown".to_string()
     }
 
+    #[allow(dead_code)]
     pub fn collect_processes() -> Vec<(String, i32, String)> {
         let mut procs = Vec::new();
         if let Ok(entries) = std::fs::read_dir("/proc") {
@@ -370,6 +371,7 @@ mod windows {
         "unknown".to_string()
     }
 
+    #[allow(dead_code)]
     pub fn collect_processes() -> Vec<(String, i32, String)> {
         let output = Command::new("powershell")
             .args(["-NoProfile", "-Command",
@@ -448,6 +450,7 @@ mod other {
         "unknown".to_string()
     }
 
+    #[allow(dead_code)]
     pub fn collect_processes() -> Vec<(String, i32, String)> {
         Vec::new()
     }

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -19,8 +20,6 @@ use agent_proto::events::{
     AppUsageEventMeta, AppUsageSummary, BulkEventRequest, EnrollmentRequest, EnrollmentResponse,
 };
 
-// ── Constants ──────────────────────────────────────────────────────────────
-
 const MAX_EVENT_BUFFER: usize = 10_000;
 const LOGIN_MAX_RETRIES: u32 = 5;
 const LOGIN_BASE_DELAY_SECS: u64 = 1;
@@ -28,6 +27,8 @@ const ENROLL_MAX_RETRIES: u32 = 5;
 const ENROLL_BASE_DELAY_SECS: u64 = 2;
 const CONSECUTIVE_HB_FAILURES_FOR_REENROLL: u32 = 3;
 const UPLOAD_RETRY_DELAY_SECS: u64 = 5;
+const IDLE_THRESHOLD_SECS: f64 = 300.0;
+const SCREENSHOT_INTERVAL_SECS: u64 = 300;
 
 // ── CLI / Config ────────────────────────────────────────────────────────────
 
@@ -172,12 +173,22 @@ struct LoginResponse {
     token: String,
 }
 
+struct ActiveWindowSession {
+    app_name: String,
+    window_title: String,
+    process_name: String,
+    process_id: i32,
+    start_time: chrono::DateTime<Utc>,
+}
+
 struct AgentState {
     device_id: String,
     device_token: String,
     jwt_token: String,
     events: Vec<AppUsageEventMeta>,
     consecutive_heartbeat_failures: u32,
+    active_window: Option<ActiveWindowSession>,
+    idle_since: Option<chrono::DateTime<Utc>>,
 }
 
 impl AgentState {
@@ -208,6 +219,27 @@ impl AgentState {
         } else {
             self.events.extend(events);
         }
+    }
+
+    fn close_active_window(&mut self) -> Option<AppUsageEventMeta> {
+        let session = self.active_window.take()?;
+        let now = Utc::now();
+        let duration = (now - session.start_time).num_seconds() as f64;
+        let (classification, confidence) = classify_process(&session.process_name);
+        let event = AppUsageEventMeta {
+            app_name: session.app_name.clone(),
+            window_title: session.window_title.clone(),
+            process_name: session.process_name.clone(),
+            process_id: session.process_id,
+            start_time: session.start_time,
+            end_time: now,
+            duration_sec: duration,
+            classification,
+            confidence,
+            role_id: None,
+            device_id: self.device_id.clone(),
+        };
+        Some(event)
     }
 }
 
@@ -578,53 +610,103 @@ async fn collect_loop(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut tick = interval(Duration::from_secs(10));
+    let mut cpu_cache: Option<HashMap<i32, (u64, u64)>> = None;
+
     loop {
         tokio::select! {
             _ = tick.tick() => {}
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
+                    if let Some(event) = state.lock().await.close_active_window() {
+                        info!(app = %event.app_name, dur = event.duration_sec, "Closed active window on shutdown");
+                        state.lock().await.push_events(vec![event]);
+                    }
                     info!("Collect loop shutting down");
                     return;
                 }
             }
         }
 
-        let procs = os::collect_processes();
-        let now = chrono::Utc::now();
-        let mut new_events = Vec::new();
+        let now = Utc::now();
+        let idle_secs = agent_collectors::get_idle_seconds();
+        let active_win = agent_collectors::get_active_window();
+        let mut flush_events: Vec<AppUsageEventMeta> = Vec::new();
 
-        for (name, pid, cmdline) in &procs {
-            let (classification, confidence) = classify_process(name);
-            let window_title = if cmdline.is_empty() {
-                name.clone()
-            } else {
-                format!("{} - {}", name, cmdline)
-            };
-            let event = AppUsageEventMeta {
-                app_name: name.clone(),
-                window_title,
-                process_name: name.clone(),
-                process_id: *pid,
-                start_time: now,
-                end_time: now,
-                duration_sec: 0.0,
-                classification,
-                confidence,
-                role_id: None,
-                device_id: String::new(),
-            };
-            new_events.push(event);
-        }
-
-        let count = new_events.len();
         {
             let mut s = state.lock().await;
-            for ev in &mut new_events {
+
+            if idle_secs >= IDLE_THRESHOLD_SECS {
+                if s.idle_since.is_none() {
+                    s.idle_since = Some(now);
+                    info!(idle_secs, "User went idle");
+                }
+                if let Some(event) = s.close_active_window() {
+                    info!(app = %event.app_name, dur = event.duration_sec, "Closed active window due to idle");
+                    flush_events.push(event);
+                }
+            } else {
+                if s.idle_since.is_some() {
+                    info!("User returned from idle");
+                    s.idle_since = None;
+                }
+            }
+
+            if idle_secs < IDLE_THRESHOLD_SECS {
+                match active_win {
+                    Some(win) => {
+                        match &s.active_window {
+                            Some(current) if current.app_name == win.process_name && current.window_title == win.title => {}
+                            Some(_) => {
+                                if let Some(event) = s.close_active_window() {
+                                    info!(app = %event.app_name, dur = event.duration_sec, "Active window changed");
+                                    flush_events.push(event);
+                                }
+                                s.active_window = Some(ActiveWindowSession {
+                                    app_name: win.process_name.clone(),
+                                    window_title: win.title.clone(),
+                                    process_name: win.process_name.clone(),
+                                    process_id: win.process_id,
+                                    start_time: now,
+                                });
+                            }
+                            None => {
+                                info!(app = %win.process_name, title = %win.title, "New active window");
+                                s.active_window = Some(ActiveWindowSession {
+                                    app_name: win.process_name.clone(),
+                                    window_title: win.title.clone(),
+                                    process_name: win.process_name.clone(),
+                                    process_id: win.process_id,
+                                    start_time: now,
+                                });
+                            }
+                        }
+                    }
+                    None => {
+                        if let Some(event) = s.close_active_window() {
+                            info!(app = %event.app_name, dur = event.duration_sec, "No active window, closing session");
+                            flush_events.push(event);
+                        }
+                    }
+                }
+            }
+        }
+
+        let procs = agent_collectors::get_running_applications_with_cpu_cache(cpu_cache.as_ref());
+        let new_cache = agent_collectors::build_cpu_cache(&procs);
+        cpu_cache = Some(new_cache);
+
+        {
+            let mut s = state.lock().await;
+            for ev in &mut flush_events {
                 ev.device_id = s.device_id.clone();
             }
-            s.push_events(new_events);
+            s.push_events(flush_events);
+
+            if !procs.is_empty() {
+                let app_summary: Vec<String> = procs.iter().take(5).map(|p| format!("{}({})", p.name, p.pid)).collect();
+                info!(idle = idle_secs, apps = ?app_summary, "Collection tick");
+            }
         }
-        info!(count, "Collected process events");
     }
 }
 
@@ -664,6 +746,40 @@ async fn upload_loop(
 
         if let Err(e) = upload_events(&client, &cfg, &state, &device_id, &jwt_token, events).await {
             error!("Upload cycle failed: {}", e);
+        }
+    }
+}
+
+async fn screenshot_loop(
+    _state: Arc<Mutex<AgentState>>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let commander = agent_screenshot::ScreenshotCommander::new();
+    let mut tick = interval(Duration::from_secs(SCREENSHOT_INTERVAL_SECS));
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    info!("Screenshot loop shutting down");
+                    return;
+                }
+            }
+        }
+
+        let idle_secs = agent_collectors::get_idle_seconds();
+        if idle_secs >= IDLE_THRESHOLD_SECS {
+            info!(idle_secs, "Skipping screenshot: user idle");
+            continue;
+        }
+
+        match commander.capture().await {
+            Ok(data) => {
+                info!(size = data.len(), "Screenshot captured");
+            }
+            Err(e) => {
+                info!("Screenshot skipped: {}", e);
+            }
         }
     }
 }
@@ -882,6 +998,8 @@ async fn run_agent() -> Result<()> {
         jwt_token: jwt_token.clone(),
         events: Vec::new(),
         consecutive_heartbeat_failures: 0,
+        active_window: None,
+        idle_since: None,
     }));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -922,6 +1040,12 @@ async fn run_agent() -> Result<()> {
         upload_loop(upload_client, upload_cfg, upload_state, upload_shutdown).await;
     });
 
+    let screenshot_state = Arc::clone(&state);
+    let screenshot_shutdown = shutdown_rx.clone();
+    let screenshot_handle = tokio::spawn(async move {
+        screenshot_loop(screenshot_state, screenshot_shutdown).await;
+    });
+
     info!("AINMS Agent running. Press Ctrl+C to stop.");
 
     tokio::signal::ctrl_c().await?;
@@ -953,6 +1077,7 @@ async fn run_agent() -> Result<()> {
     heartbeat_handle.abort();
     collect_handle.abort();
     upload_handle.abort();
+    screenshot_handle.abort();
 
     info!("AINMS Agent stopped.");
     Ok(())

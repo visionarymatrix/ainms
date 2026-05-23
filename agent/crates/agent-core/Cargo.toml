@@ -21,5 +21,6 @@ agent-store = { path = "../agent-store" }
 agent-uploader = { path = "../agent-uploader" }
 agent-collectors = { path = "../agent-collectors" }
 agent-service = { path = "../agent-service" }
+agent-screenshot = { path = "../agent-screenshot" }
 toml = "0.8"
 sha2 = "0.10"
