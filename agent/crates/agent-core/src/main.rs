@@ -10,19 +10,20 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::sync::Mutex;
 use tokio::time::{interval, sleep};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use agent_proto::events::{
-    AppUsageEventMeta, AppUsageSummary, BulkEventRequest, EnrollmentRequest, EnrollmentResponse,
+    AppUsageEventMeta, AppUsageSummary, BulkEventRequest, EnrollmentResponse,
+    TokenEnrollRequest,
 };
 
+use config::{default_config_path, load_state, save_state, AgentStateFile, AgentStateSection};
+
 const MAX_EVENT_BUFFER: usize = 10_000;
-const LOGIN_MAX_RETRIES: u32 = 5;
-const LOGIN_BASE_DELAY_SECS: u64 = 1;
 const ENROLL_MAX_RETRIES: u32 = 5;
 const ENROLL_BASE_DELAY_SECS: u64 = 2;
 const CONSECUTIVE_HB_FAILURES_FOR_REENROLL: u32 = 3;
@@ -35,7 +36,12 @@ const SCREENSHOT_INTERVAL_SECS: u64 = 300;
 #[derive(Subcommand, Debug)]
 enum ServiceCommand {
     #[command(about = "Install the agent as a system service (requires admin/root)")]
-    Install,
+    Install {
+        #[arg(long, help = "Install token for enrollment and authentication")]
+        install_token: Option<String>,
+        #[arg(long, help = "AINMS server URL")]
+        server: Option<String>,
+    },
     #[command(about = "Uninstall the agent system service (requires admin/root)")]
     Uninstall,
     #[command(about = "Start the agent system service")]
@@ -47,20 +53,11 @@ enum ServiceCommand {
 #[derive(Parser, Debug)]
 #[command(name = "ainms-agent", version = "0.2.0", about = "AINMS Agent")]
 struct Args {
-    #[arg(long, value_name = "ID")]
-    employee_id: Option<String>,
-
-    #[arg(long)]
-    company_id: Option<String>,
+    #[arg(long, help = "Install token for enrollment and authentication")]
+    install_token: Option<String>,
 
     #[arg(long)]
     server: Option<String>,
-
-    #[arg(long)]
-    auth_email: Option<String>,
-
-    #[arg(long)]
-    auth_password: Option<String>,
 
     #[arg(long)]
     config: Option<String>,
@@ -74,11 +71,15 @@ struct Args {
 
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
-    employee_id: Option<String>,
-    company_id: Option<String>,
     server: Option<String>,
-    auth_email: Option<String>,
-    auth_password: Option<String>,
+    install_token: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedConfig {
+    install_token: Option<String>,
+    server: String,
+    config_path: String,
 }
 
 fn resolve_config(args: &Args) -> ResolvedConfig {
@@ -91,36 +92,22 @@ fn resolve_config(args: &Args) -> ResolvedConfig {
             toml::from_str(&contents).unwrap_or_else(|e| {
                 warn!("Failed to parse config file: {}", e);
                 ConfigFile {
-                    employee_id: None,
-                    company_id: None,
                     server: None,
-                    auth_email: None,
-                    auth_password: None,
+                    install_token: None,
                 }
             })
         }
         None => ConfigFile {
-            employee_id: None,
-            company_id: None,
             server: None,
-            auth_email: None,
-            auth_password: None,
+            install_token: None,
         },
     };
 
-    let employee_id = args
-        .employee_id
+    let install_token = args
+        .install_token
         .clone()
-        .or(file_cfg.employee_id)
-        .or_else(|| std::env::var("AINMS_EMPLOYEE_ID").ok())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let company_id = args
-        .company_id
-        .clone()
-        .or(file_cfg.company_id)
-        .or_else(|| std::env::var("AINMS_COMPANY_ID").ok())
-        .unwrap_or_else(|| "unknown".to_string());
+        .or(file_cfg.install_token)
+        .or_else(|| std::env::var("AINMS_INSTALL_TOKEN").ok());
 
     let server = args
         .server
@@ -129,49 +116,19 @@ fn resolve_config(args: &Args) -> ResolvedConfig {
         .or_else(|| std::env::var("AINMS_SERVER").ok())
         .unwrap_or_else(|| "http://173.249.47.143:8440".to_string());
 
-    let auth_email = args
-        .auth_email
+    let config_path = args
+        .config
         .clone()
-        .or(file_cfg.auth_email)
-        .or_else(|| std::env::var("AINMS_EMAIL").ok())
-        .unwrap_or_else(|| "superadmin@ainms.io".to_string());
-
-    let auth_password = args
-        .auth_password
-        .clone()
-        .or(file_cfg.auth_password)
-        .or_else(|| std::env::var("AINMS_PASSWORD").ok())
-        .unwrap_or_else(|| "changeme".to_string());
+        .unwrap_or_else(default_config_path);
 
     ResolvedConfig {
-        employee_id,
-        company_id,
+        install_token,
         server,
-        auth_email,
-        auth_password,
+        config_path,
     }
 }
 
-struct ResolvedConfig {
-    employee_id: String,
-    company_id: String,
-    server: String,
-    auth_email: String,
-    auth_password: String,
-}
-
 // ── API types ───────────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-struct LoginRequest {
-    email: String,
-    password: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct LoginResponse {
-    token: String,
-}
 
 struct ActiveWindowSession {
     app_name: String,
@@ -184,11 +141,12 @@ struct ActiveWindowSession {
 struct AgentState {
     device_id: String,
     device_token: String,
-    jwt_token: String,
+    install_token: String,
     events: Vec<AppUsageEventMeta>,
     consecutive_heartbeat_failures: u32,
     active_window: Option<ActiveWindowSession>,
     idle_since: Option<chrono::DateTime<Utc>>,
+    config_path: String,
 }
 
 impl AgentState {
@@ -241,6 +199,20 @@ impl AgentState {
         };
         Some(event)
     }
+
+    fn persist(&self, server: &str) {
+        let state_file = AgentStateFile {
+            agent: AgentStateSection {
+                server: server.to_string(),
+                install_token: self.install_token.clone(),
+                device_id: self.device_id.clone(),
+                device_token: self.device_token.clone(),
+            },
+        };
+        if let Err(e) = save_state(&self.config_path, &state_file) {
+            warn!("Failed to persist agent state: {}", e);
+        }
+    }
 }
 
 // ── Exponential backoff helper ───────────────────────────────────────────────
@@ -279,56 +251,14 @@ where
 
 // ── API functions ────────────────────────────────────────────────────────────
 
-async fn login(
+async fn enroll_with_token(
     client: &reqwest::Client,
     server: &str,
-    email: &str,
-    password: &str,
-) -> Result<String> {
-    let req = LoginRequest {
-        email: email.to_string(),
-        password: password.to_string(),
-    };
-    let resp = client
-        .post(format!("{}/v1/auth/login", server))
-        .json(&req)
-        .send()
-        .await
-        .context("Failed to send login request")?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("Login failed with status {}: {}", status, body);
-    }
-
-    let login_resp: LoginResponse = resp.json().await.context("Failed to parse login response")?;
-    Ok(login_resp.token)
-}
-
-async fn login_with_retry(
-    client: &reqwest::Client,
-    server: &str,
-    email: &str,
-    password: &str,
-) -> Result<String> {
-    retry_with_backoff("login", LOGIN_MAX_RETRIES, LOGIN_BASE_DELAY_SECS, || {
-        login(client, server, email, password)
-    })
-    .await
-}
-
-async fn enroll(
-    client: &reqwest::Client,
-    server: &str,
-    employee_id: &str,
-    company_id: &str,
-    jwt_token: &str,
+    install_token: &str,
 ) -> Result<EnrollmentResponse> {
     let hostname = gethostname::gethostname()
         .into_string()
         .unwrap_or_else(|_| "unknown".to_string());
-
     let os_type = os::os_type();
     let os_version = os::os_version();
     let fingerprint = os::generate_fingerprint();
@@ -338,9 +268,8 @@ async fn enroll(
     let mac_addresses = os::mac_addresses();
     let ip_addresses = os::ip_addresses();
 
-    let req = EnrollmentRequest {
-        employee_id: employee_id.to_string(),
-        company_id: company_id.to_string(),
+    let req = TokenEnrollRequest {
+        install_token: install_token.to_string(),
         hostname: hostname.clone(),
         os_type: os_type.clone(),
         os_version: os_version.clone(),
@@ -352,52 +281,37 @@ async fn enroll(
         ip_addresses: if ip_addresses.is_empty() { None } else { Some(ip_addresses) },
     };
 
-    info!(
-        employee_id,
-        company_id,
-        hostname,
-        os_type,
-        os_version,
-        fingerprint = &fingerprint[..16.min(fingerprint.len())],
-        "Enrolling device"
-    );
+    info!(install_token = &install_token[..8.min(install_token.len())], "Enrolling with install token");
 
     let resp = client
-        .post(format!("{}/v1/enroll", server))
-        .header("Authorization", format!("Bearer {}", jwt_token))
+        .post(format!("{}/v1/enroll/token", server))
         .json(&req)
         .send()
         .await
-        .context("Failed to send enrollment request")?;
+        .context("Failed to send token enrollment request")?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("Enrollment failed with status {}: {}", status, body);
+        anyhow::bail!("Token enrollment failed with status {}: {}", status, body);
     }
 
-    let enroll_resp: EnrollmentResponse = resp
-        .json()
-        .await
-        .context("Failed to parse enrollment response")?;
-
-    info!(device_id = %enroll_resp.device_id, status = %enroll_resp.status, "Enrolled");
+    let enroll_resp: EnrollmentResponse = resp.json().await.context("Failed to parse enrollment response")?;
+    info!(device_id = %enroll_resp.device_id, status = %enroll_resp.status, "Enrolled with token");
 
     Ok(enroll_resp)
 }
 
-async fn enroll_with_retry(
+async fn enroll_with_token_retry(
     client: &reqwest::Client,
     server: &str,
-    employee_id: &str,
-    company_id: &str,
-    jwt_token: &str,
+    install_token: &str,
 ) -> Result<EnrollmentResponse> {
     retry_with_backoff(
-        "enrollment",
+        "token-enrollment",
         ENROLL_MAX_RETRIES,
         ENROLL_BASE_DELAY_SECS,
-        || enroll(client, server, employee_id, company_id, jwt_token),
+        || enroll_with_token(client, server, install_token),
     )
     .await
 }
@@ -429,28 +343,13 @@ fn classify_process(name: &str) -> (String, f64) {
     ("unproductive".to_string(), 0.3)
 }
 
-// ── JWT refresh helper ───────────────────────────────────────────────────────
-
-async fn refresh_jwt(
-    client: &reqwest::Client,
-    state: &Arc<Mutex<AgentState>>,
-    cfg: &ResolvedConfig,
-) -> Result<String> {
-    info!("JWT expired or unauthorized, refreshing token...");
-    let new_token = login_with_retry(client, &cfg.server, &cfg.auth_email, &cfg.auth_password).await?;
-    let mut s = state.lock().await;
-    s.jwt_token = new_token.clone();
-    info!("JWT token refreshed successfully");
-    Ok(new_token)
-}
-
 // ── Heartbeat loop ──────────────────────────────────────────────────────────
 
 async fn heartbeat_loop(
     client: reqwest::Client,
     cfg: ResolvedConfig,
     state: Arc<Mutex<AgentState>>,
-mut shutdown: tokio::sync::watch::Receiver<bool>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut tick = interval(Duration::from_secs(60));
     loop {
@@ -464,15 +363,15 @@ mut shutdown: tokio::sync::watch::Receiver<bool>,
             }
         }
 
-        let (device_id, jwt_token) = {
+        let (device_id, install_token) = {
             let s = state.lock().await;
-            (s.device_id.clone(), s.jwt_token.clone())
+            (s.device_id.clone(), s.install_token.clone())
         };
 
         let url = format!("{}/v1/devices/{}/heartbeat", cfg.server, device_id);
         match client
             .put(&url)
-            .header("Authorization", format!("Bearer {}", jwt_token))
+            .header("Authorization", format!("Bearer {}", install_token))
             .send()
             .await
         {
@@ -487,15 +386,7 @@ mut shutdown: tokio::sync::watch::Receiver<bool>,
                 s.consecutive_heartbeat_failures += 1;
             }
             Ok(resp) if resp.status().as_u16() == 401 => {
-                warn!("Heartbeat got 401, attempting JWT refresh");
-                match refresh_jwt(&client, &state, &cfg).await {
-                    Ok(_) => {
-                        info!("JWT refreshed, will retry heartbeat next cycle");
-                    }
-                    Err(e) => {
-                        error!("Failed to refresh JWT: {}", e);
-                    }
-                }
+                warn!("Heartbeat got 401 (install token may be revoked)");
                 let mut s = state.lock().await;
                 s.consecutive_heartbeat_failures += 1;
             }
@@ -542,18 +433,22 @@ async fn reenroll(
     cfg: &ResolvedConfig,
     state: &Arc<Mutex<AgentState>>,
 ) -> Result<()> {
-    let jwt_token = {
+    let install_token = {
         let s = state.lock().await;
-        s.jwt_token.clone()
+        s.install_token.clone()
     };
 
-    let enroll_resp =
-        enroll_with_retry(client, &cfg.server, &cfg.employee_id, &cfg.company_id, &jwt_token).await?;
+    if install_token.is_empty() {
+        anyhow::bail!("No install token available for re-enrollment");
+    }
 
+    let enroll_resp = enroll_with_token_retry(client, &cfg.server, &install_token).await?;
     let mut s = state.lock().await;
     s.device_id = enroll_resp.device_id.clone();
     s.device_token = enroll_resp.device_token.clone();
-    info!(new_device_id = %enroll_resp.device_id, "Device re-enrolled with new ID");
+    s.consecutive_heartbeat_failures = 0;
+    s.persist(&cfg.server);
+    info!(new_device_id = %enroll_resp.device_id, "Device re-enrolled with token");
     Ok(())
 }
 
@@ -663,7 +558,7 @@ async fn collect_loop(
                                 }
                                 s.active_window = Some(ActiveWindowSession {
                                     app_name: win.process_name.clone(),
-                                    window_title: win.title.clone(),
+                                    window_title: win.title,
                                     process_name: win.process_name.clone(),
                                     process_id: win.process_id,
                                     start_time: now,
@@ -673,7 +568,7 @@ async fn collect_loop(
                                 info!(app = %win.process_name, title = %win.title, "New active window");
                                 s.active_window = Some(ActiveWindowSession {
                                     app_name: win.process_name.clone(),
-                                    window_title: win.title.clone(),
+                                    window_title: win.title,
                                     process_name: win.process_name.clone(),
                                     process_id: win.process_id,
                                     start_time: now,
@@ -767,12 +662,12 @@ async fn upload_loop(
             continue;
         }
 
-        let (device_id, jwt_token) = {
+        let (device_id, install_token) = {
             let s = state.lock().await;
-            (s.device_id.clone(), s.jwt_token.clone())
+            (s.device_id.clone(), s.install_token.clone())
         };
 
-        if let Err(e) = upload_events(&client, &cfg, &state, &device_id, &jwt_token, events).await {
+        if let Err(e) = upload_events(&client, &cfg.server, &state, &device_id, &install_token, events).await {
             error!("Upload cycle failed: {}", e);
         }
     }
@@ -814,10 +709,10 @@ async fn screenshot_loop(
 
 async fn upload_events(
     client: &reqwest::Client,
-    cfg: &ResolvedConfig,
+    server: &str,
     state: &Arc<Mutex<AgentState>>,
     device_id: &str,
-    jwt_token: &str,
+    install_token: &str,
     events: Vec<AppUsageEventMeta>,
 ) -> Result<()> {
     let mut summary_map: HashMap<String, (f64, u64, f64, f64, f64)> = HashMap::new();
@@ -859,45 +754,11 @@ async fn upload_events(
             metadata: meta,
         };
 
-        match send_bulk_event(client, &cfg.server, jwt_token, &bulk).await {
+        match send_bulk_event(client, server, install_token, &bulk).await {
             Ok(()) => {
                 info!(app_name, meta_count, "Uploaded events for app");
             }
-            Err(UploadError::Unauthorized) => {
-                warn!("Upload got 401 for app '{}', refreshing JWT and retrying", app_name);
-                match refresh_jwt(client, state, cfg).await {
-                    Ok(new_token) => {
-                        match send_bulk_event(client, &cfg.server, &new_token, &bulk).await {
-                            Ok(()) => {
-                                info!(app_name, meta_count, "Uploaded events for app after JWT refresh");
-                            }
-                            Err(_) => {
-                                warn!("Upload retry failed for '{}', re-queuing events", app_name);
-                                let mut s = state.lock().await;
-                                s.requeue_events(
-                                    events
-                                        .iter()
-                                        .filter(|e| e.app_name == *app_name)
-                                        .cloned()
-                                        .collect(),
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("JWT refresh failed: {}, re-queuing events for '{}'", e, app_name);
-                        let mut s = state.lock().await;
-                        s.requeue_events(
-                            events
-                                .iter()
-                                .filter(|e| e.app_name == *app_name)
-                                .cloned()
-                                .collect(),
-                        );
-                    }
-                }
-            }
-            Err(UploadError::Failed(_msg)) => {
+            Err(_) => {
                 warn!("Upload failed for '{}', re-queuing events", app_name);
                 let mut s = state.lock().await;
                 s.requeue_events(
@@ -915,19 +776,18 @@ async fn upload_events(
 }
 
 enum UploadError {
-    Unauthorized,
     Failed(String),
 }
 
 async fn send_bulk_event(
     client: &reqwest::Client,
     server: &str,
-    jwt_token: &str,
+    install_token: &str,
     bulk: &BulkEventRequest,
 ) -> std::result::Result<(), UploadError> {
     let resp = client
         .post(format!("{}/v1/events/bulk", server))
-        .header("Authorization", format!("Bearer {}", jwt_token))
+        .header("Authorization", format!("Bearer {}", install_token))
         .json(bulk)
         .send()
         .await;
@@ -936,8 +796,6 @@ async fn send_bulk_event(
         Ok(resp) => {
             if resp.status().is_success() {
                 Ok(())
-            } else if resp.status().as_u16() == 401 {
-                Err(UploadError::Unauthorized)
             } else {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
@@ -958,17 +816,24 @@ async fn send_bulk_event(
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Handle service management commands first (no tokio runtime needed)
     if let Some(ref cmd) = args.service {
         match cmd {
-            ServiceCommand::Install => return agent_service::install(),
+            ServiceCommand::Install { install_token, server } => {
+                let server = server.clone().unwrap_or_else(|| "http://173.249.47.143:8440".to_string());
+                if let Some(token) = install_token {
+                    let config_path = default_config_path();
+                    if let Err(e) = config::write_initial_config(&config_path, &server, token) {
+                        warn!("Failed to write initial config: {}", e);
+                    }
+                }
+                return agent_service::install();
+            }
             ServiceCommand::Uninstall => return agent_service::uninstall(),
             ServiceCommand::Start => return agent_service::start(),
             ServiceCommand::Stop => return agent_service::stop(),
         }
     }
 
-    // Windows service mode: hand off to SCM
     if args.run_as_service {
         #[cfg(target_os = "windows")]
         {
@@ -984,7 +849,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // Normal CLI mode
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(run_agent())
 }
@@ -1003,31 +867,22 @@ async fn run_agent() -> Result<()> {
         .timeout(Duration::from_secs(30))
         .build()?;
 
-    info!(email = %cfg.auth_email, "Logging in...");
-    let jwt_token = login_with_retry(&client, &cfg.server, &cfg.auth_email, &cfg.auth_password)
-        .await
-        .context("Failed to login after all retries")?;
-    info!("Login successful");
-
-    let enroll_resp = enroll_with_retry(&client, &cfg.server, &cfg.employee_id, &cfg.company_id, &jwt_token)
-        .await
-        .context("Failed to enroll after all retries")?;
-    info!(device_id = %enroll_resp.device_id, status = %enroll_resp.status, "Enrolled");
-
-    if enroll_resp.status == "pending" {
-        wait_for_approval(&client, &cfg.server, &enroll_resp.device_id).await?;
-    } else if enroll_resp.status == "rejected" {
-        anyhow::bail!("Device enrollment was rejected by admin");
-    }
+    let (device_id, device_token, install_token) = match try_resume_or_enroll(&client, &cfg).await {
+        Ok(result) => result,
+        Err(e) => {
+            anyhow::bail!("Failed to establish agent identity: {}. Run: ainms-agent --install-token <TOKEN> --server <URL>", e);
+        }
+    };
 
     let state = Arc::new(Mutex::new(AgentState {
-        device_id: enroll_resp.device_id.clone(),
-        device_token: enroll_resp.device_token.clone(),
-        jwt_token: jwt_token.clone(),
+        device_id: device_id.clone(),
+        device_token: device_token.clone(),
+        install_token: install_token.clone(),
         events: Vec::new(),
         consecutive_heartbeat_failures: 0,
         active_window: None,
         idle_since: None,
+        config_path: cfg.config_path.clone(),
     }));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -1035,13 +890,7 @@ async fn run_agent() -> Result<()> {
     info!("Starting heartbeat, collector, and uploader loops...");
 
     let hb_client = client.clone();
-    let hb_cfg = ResolvedConfig {
-        employee_id: cfg.employee_id.clone(),
-        company_id: cfg.company_id.clone(),
-        server: cfg.server.clone(),
-        auth_email: cfg.auth_email.clone(),
-        auth_password: cfg.auth_password.clone(),
-    };
+    let hb_cfg = cfg.clone();
     let hb_state = Arc::clone(&state);
     let hb_shutdown = shutdown_rx.clone();
     let heartbeat_handle = tokio::spawn(async move {
@@ -1055,13 +904,7 @@ async fn run_agent() -> Result<()> {
     });
 
     let upload_client = client.clone();
-    let upload_cfg = ResolvedConfig {
-        employee_id: cfg.employee_id.clone(),
-        company_id: cfg.company_id.clone(),
-        server: cfg.server.clone(),
-        auth_email: cfg.auth_email.clone(),
-        auth_password: cfg.auth_password.clone(),
-    };
+    let upload_cfg = cfg.clone();
     let upload_state = Arc::clone(&state);
     let upload_shutdown = shutdown_rx.clone();
     let upload_handle = tokio::spawn(async move {
@@ -1079,7 +922,6 @@ async fn run_agent() -> Result<()> {
     tokio::signal::ctrl_c().await?;
     info!("\nShutting down gracefully...");
 
-    // Signal all loops to stop
     let _ = shutdown_tx.send(true);
 
     {
@@ -1089,12 +931,12 @@ async fn run_agent() -> Result<()> {
         };
         if !events.is_empty() {
             info!(count = events.len(), "Attempting final upload of pending events...");
-            let (device_id, jwt_token) = {
+            let (device_id, install_token) = {
                 let s = state.lock().await;
-                (s.device_id.clone(), s.jwt_token.clone())
+                (s.device_id.clone(), s.install_token.clone())
             };
             if let Err(e) =
-                upload_events(&client, &cfg, &state, &device_id, &jwt_token, events).await
+                upload_events(&client, &cfg.server, &state, &device_id, &install_token, events).await
             {
                 warn!("Final upload failed: {}", e);
             }
@@ -1109,4 +951,80 @@ async fn run_agent() -> Result<()> {
 
     info!("AINMS Agent stopped.");
     Ok(())
+}
+
+async fn try_resume_or_enroll(
+    client: &reqwest::Client,
+    cfg: &ResolvedConfig,
+) -> Result<(String, String, String)> {
+    // Step 1: Try to resume from saved state
+    if let Some(saved) = load_state(&cfg.config_path) {
+        let a = &saved.agent;
+        if !a.device_id.is_empty() && !a.device_token.is_empty() && !a.install_token.is_empty() {
+            info!(device_id = %a.device_id, "Found saved state, trying heartbeat to resume...");
+            match try_heartbeat(client, &cfg.server, &a.device_id, &a.install_token).await {
+                Ok(()) => {
+                    info!("Resumed with saved device identity (heartbeat OK)");
+                    return Ok((a.device_id.clone(), a.device_token.clone(), a.install_token.clone()));
+                }
+                Err(e) => {
+                    warn!("Saved state heartbeat failed: {}, proceeding to re-enroll", e);
+                }
+            }
+        }
+    }
+
+    // Step 2: Enroll with install token
+    if let Some(ref install_token) = cfg.install_token {
+        if !install_token.is_empty() {
+            info!("Enrolling with install token...");
+            let enroll_resp = enroll_with_token_retry(client, &cfg.server, install_token).await?;
+
+            if enroll_resp.status == "pending" {
+                wait_for_approval(client, &cfg.server, &enroll_resp.device_id).await?;
+            } else if enroll_resp.status == "rejected" {
+                anyhow::bail!("Device enrollment was rejected by admin");
+            }
+
+            let state_file = AgentStateFile {
+                agent: AgentStateSection {
+                    server: cfg.server.clone(),
+                    install_token: install_token.clone(),
+                    device_id: enroll_resp.device_id.clone(),
+                    device_token: enroll_resp.device_token.clone(),
+                },
+            };
+            if let Err(e) = save_state(&cfg.config_path, &state_file) {
+                warn!("Failed to save state after enrollment: {}", e);
+            }
+
+            return Ok((enroll_resp.device_id, enroll_resp.device_token, install_token.clone()));
+        }
+    }
+
+    // Step 3: No token, no saved state
+    anyhow::bail!("No install token provided and no saved state found. Run: ainms-agent --install-token <TOKEN> --server <URL>");
+}
+
+async fn try_heartbeat(
+    client: &reqwest::Client,
+    server: &str,
+    device_id: &str,
+    install_token: &str,
+) -> Result<()> {
+    let url = format!("{}/v1/devices/{}/heartbeat", server, device_id);
+    let resp = client
+        .put(&url)
+        .header("Authorization", format!("Bearer {}", install_token))
+        .send()
+        .await
+        .context("Heartbeat request failed")?;
+
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Heartbeat failed with status {}: {}", status, body);
+    }
 }

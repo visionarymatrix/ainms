@@ -2,6 +2,25 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenEnrollRequest {
+    pub install_token: String,
+    pub hostname: String,
+    pub os_type: String,
+    pub os_version: String,
+    pub fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_info: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ram_info: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_info: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac_addresses: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip_addresses: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollmentRequest {
     pub employee_id: String,
     pub company_id: String,
