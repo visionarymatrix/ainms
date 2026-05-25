@@ -19,5 +19,8 @@ windows = { version = "0.58", features = [
 ] }
 png = "0.17"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.10", default-features = false, features = ["tokio"] }
+
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

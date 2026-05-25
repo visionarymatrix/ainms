@@ -2,9 +2,11 @@ use std::process::Command;
 use tracing::{info, warn};
 
 enum CaptureMethod {
+    Portal,
     Scrot,
     Import,
-    XdgScreenshot,
+    Grim,
+    GnomeScreenshot,
     None,
 }
 
@@ -16,23 +18,34 @@ impl ScreenshotCommander {
     pub fn new() -> Self {
         let method = Self::detect_method();
         match &method {
+            CaptureMethod::Portal => info!("screenshot: using xdg-desktop-portal"),
             CaptureMethod::Scrot => info!("screenshot: using scrot"),
             CaptureMethod::Import => info!("screenshot: using ImageMagick import"),
-            CaptureMethod::XdgScreenshot => info!("screenshot: using xdg-screencapture"),
+            CaptureMethod::Grim => info!("screenshot: using grim"),
+            CaptureMethod::GnomeScreenshot => info!("screenshot: using gnome-screenshot"),
             CaptureMethod::None => warn!("screenshot: no capture tool available"),
         }
         ScreenshotCommander { method }
     }
 
     fn detect_method() -> CaptureMethod {
+        if std::env::var("WAYLAND_DISPLAY").is_ok() {
+            return CaptureMethod::Portal;
+        }
         if Self::which("scrot") {
             return CaptureMethod::Scrot;
         }
         if Self::which("import") {
             return CaptureMethod::Import;
         }
-        if Self::which("xdg-screencapture") {
-            return CaptureMethod::XdgScreenshot;
+        if Self::which("grim") {
+            return CaptureMethod::Grim;
+        }
+        if Self::which("gnome-screenshot") {
+            return CaptureMethod::GnomeScreenshot;
+        }
+        if std::env::var("DISPLAY").is_ok() {
+            return CaptureMethod::Portal;
         }
         CaptureMethod::None
     }
@@ -51,11 +64,33 @@ impl ScreenshotCommander {
         }
 
         match &self.method {
-            CaptureMethod::None => anyhow::bail!("No screenshot tool available"),
+            CaptureMethod::None => anyhow::bail!(
+                "No screenshot method available. Install one of: scrot, imagemagick, grim, gnome-screenshot"
+            ),
+            CaptureMethod::Portal => self.capture_with_portal().await,
             CaptureMethod::Scrot => self.capture_with_scrot(),
             CaptureMethod::Import => self.capture_with_import(),
-            CaptureMethod::XdgScreenshot => self.capture_with_xdg(),
+            CaptureMethod::Grim => self.capture_with_grim(),
+            CaptureMethod::GnomeScreenshot => self.capture_with_gnome(),
         }
+    }
+
+    async fn capture_with_portal(&self) -> anyhow::Result<Vec<u8>> {
+        use ashpd::desktop::screenshot::Screenshot;
+
+        let response = Screenshot::request()
+            .interactive(false)
+            .send()
+            .await?
+            .response()?;
+
+        let uri = response.uri();
+        let path = uri.to_file_path()
+            .map_err(|_| anyhow::anyhow!("Invalid screenshot URI path"))?;
+
+        let data = std::fs::read(&path)?;
+        let _ = std::fs::remove_file(&path);
+        Ok(data)
     }
 
     fn capture_with_scrot(&self) -> anyhow::Result<Vec<u8>> {
@@ -83,13 +118,25 @@ impl ScreenshotCommander {
         Self::read_and_delete(&tmp)
     }
 
-    fn capture_with_xdg(&self) -> anyhow::Result<Vec<u8>> {
+    fn capture_with_grim(&self) -> anyhow::Result<Vec<u8>> {
         let tmp = Self::tmp_path();
-        let status = Command::new("xdg-screencapture")
+        let status = Command::new("grim")
             .arg(&tmp)
             .status()?;
         if !status.success() {
-            anyhow::bail!("xdg-screencapture failed with exit code {:?}", status.code());
+            anyhow::bail!("grim failed with exit code {:?}", status.code());
+        }
+        Self::read_and_delete(&tmp)
+    }
+
+    fn capture_with_gnome(&self) -> anyhow::Result<Vec<u8>> {
+        let tmp = Self::tmp_path();
+        let status = Command::new("gnome-screenshot")
+            .arg("-f")
+            .arg(&tmp)
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("gnome-screenshot failed with exit code {:?}", status.code());
         }
         Self::read_and_delete(&tmp)
     }
