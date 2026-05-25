@@ -13,12 +13,32 @@ export interface Employee {
   updated_at: string;
 }
 
+export interface Device {
+  id: string;
+  employee_id: string;
+  hostname: string | null;
+  os_type: string;
+  os_version: string | null;
+  agent_version: string | null;
+  status: string;
+  connection_status: string;
+  last_heartbeat: string | null;
+  enrolled_at: string;
+  fingerprint: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export async function listEmployees(companyId: string): Promise<Employee[]> {
   return api.get<Employee[]>(`/v1/companies/${companyId}/employees`);
 }
 
 export async function getEmployee(id: string): Promise<Employee> {
   return api.get<Employee>(`/v1/employees/${id}`);
+}
+
+export async function getEmployeeDevices(employeeId: string): Promise<Device[]> {
+  return api.get<Device[]>(`/v1/employees/${employeeId}/devices`);
 }
 
 export async function registerEmployee(

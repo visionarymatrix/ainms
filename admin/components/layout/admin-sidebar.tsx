@@ -12,6 +12,7 @@ import {
   Camera,
   AlertTriangle,
   Activity,
+  Key,
 } from "lucide-react";
 import {
   Sidebar,
@@ -31,6 +32,7 @@ const allNavItems = [
   { title: "Companies", href: "/companies", icon: Building2, roles: ["super_admin"] },
   { title: "Employees", href: "/employees", icon: Users, roles: ["super_admin", "company_admin"] },
   { title: "Devices", href: "/devices", icon: Monitor, roles: ["super_admin", "company_admin"] },
+  { title: "Install Tokens", href: "/install-tokens", icon: Key, roles: ["super_admin", "company_admin"] },
   { title: "Activity", href: "/activity", icon: Activity, roles: ["super_admin", "company_admin"] },
   { title: "App Rules", href: "/app-rules", icon: Shield, roles: ["super_admin"] },
   { title: "Alert Rules", href: "/alert-rules", icon: Bell, roles: ["super_admin"] },
