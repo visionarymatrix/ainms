@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/ainms/gateway/internal/domain"
@@ -192,9 +193,9 @@ func EnrollWithToken(enrollmentSvc *service.EnrollmentService, tokenSvc *service
 			writeError(w, http.StatusBadRequest, "os_type is required")
 			return
 		}
+		// Auto-generate fingerprint from hostname+os_type if not provided (e.g., bootstrap scripts)
 		if req.Fingerprint == "" {
-			writeError(w, http.StatusBadRequest, "fingerprint is required")
-			return
+			req.Fingerprint = fmt.Sprintf("%s-%s-%s", req.Hostname, req.OSType, req.InstallToken[:8])
 		}
 
 		claims, err := tokenSvc.Validate(r.Context(), req.InstallToken)

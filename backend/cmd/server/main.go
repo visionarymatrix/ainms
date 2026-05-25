@@ -95,6 +95,9 @@ func main() {
 	r.Get("/v1/install.sh", handler.InstallShellScript())
 	r.Get("/v1/install.ps1", handler.InstallPSScript())
 
+	// Public: agent binary download
+	r.Get("/v1/agent/download", handler.AgentDownload())
+
 	// Public device status endpoint (agent polls without auth)
 	r.Get("/v1/devices/{deviceID}/status", handler.GetDeviceStatus(enrollmentSvc))
 
