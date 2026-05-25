@@ -207,6 +207,58 @@ type ScreenshotUpload struct {
 	UploadedAt  time.Time `json:"uploaded_at"`
 }
 
+// InstallToken represents a permanent auth token for agent installation and API access.
+type InstallToken struct {
+	ID          uuid.UUID   `json:"id" db:"id"`
+	Token       string      `json:"token" db:"token"`
+	EmployeeID  uuid.UUID   `json:"employee_id" db:"employee_id"`
+	CompanyID   uuid.UUID   `json:"company_id" db:"company_id"`
+	Description string      `json:"description" db:"description"`
+	ExpiresAt   *time.Time  `json:"expires_at" db:"expires_at"`
+	CreatedBy   uuid.UUID   `json:"created_by" db:"created_by"`
+	CreatedAt   time.Time   `json:"created_at" db:"created_at"`
+	RevokedAt   *time.Time  `json:"revoked_at" db:"revoked_at"`
+}
+
+type CreateInstallTokenRequest struct {
+	EmployeeID  string  `json:"employee_id" validate:"required,uuid"`
+	CompanyID   string  `json:"company_id" validate:"required,uuid"`
+	Description string  `json:"description" validate:"omitempty"`
+	ExpiresIn   *string `json:"expires_in" validate:"omitempty"`
+}
+
+type InstallTokenResponse struct {
+	ID          uuid.UUID  `json:"id"`
+	Token       string     `json:"token"`
+	InstallCmd  string     `json:"install_cmd"`
+	WindowsCmd  string     `json:"windows_cmd"`
+	EmployeeID  uuid.UUID  `json:"employee_id"`
+	CompanyID   uuid.UUID  `json:"company_id"`
+	Description string     `json:"description"`
+	ExpiresAt   *time.Time `json:"expires_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+	RevokedAt   *time.Time `json:"revoked_at"`
+}
+
+type TokenEnrollRequest struct {
+	InstallToken string `json:"install_token" validate:"required"`
+	Hostname     string `json:"hostname" validate:"omitempty"`
+	OSType       string `json:"os_type" validate:"required,oneof=windows macos linux"`
+	OSVersion    string `json:"os_version" validate:"omitempty"`
+	Fingerprint  string `json:"fingerprint" validate:"required"`
+	CPUInfo      string `json:"cpu_info" validate:"omitempty"`
+	RAMInfo      string `json:"ram_info" validate:"omitempty"`
+	DiskInfo     string `json:"disk_info" validate:"omitempty"`
+	MACAddresses string `json:"mac_addresses" validate:"omitempty"`
+	IPAddresses  string `json:"ip_addresses" validate:"omitempty"`
+}
+
+type InstallTokenClaims struct {
+	EmployeeID string
+	CompanyID  string
+	Role       string
+}
+
 // JSONMap is a helper type for JSONB columns.
 type JSONMap map[string]interface{}
 
