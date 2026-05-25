@@ -91,8 +91,9 @@ func main() {
 	// Public: token-based enrollment (install_token is the auth)
 	r.Post("/v1/enroll/token", handler.EnrollWithToken(enrollmentSvc, installTokenSvc))
 
-	// Public: install script for curl|sh
+	// Public: install scripts for curl|sh and powershell
 	r.Get("/v1/install.sh", handler.InstallShellScript())
+	r.Get("/v1/install.ps1", handler.InstallPSScript())
 
 	// Public device status endpoint (agent polls without auth)
 	r.Get("/v1/devices/{deviceID}/status", handler.GetDeviceStatus(enrollmentSvc))
