@@ -269,6 +269,141 @@ func (s *EnrollmentService) FleetStatus(ctx context.Context, role string, compan
 	return devices, nil
 }
 
+func (s *EnrollmentService) EnrollWithToken(ctx context.Context, req domain.EnrollmentRequest) (*domain.EnrollmentResponse, error) {
+	employeeUUID, err := uuid.Parse(req.EmployeeID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid employee_id: %w", err)
+	}
+
+	employee, err := s.employeeRepo.GetByID(ctx, employeeUUID)
+	if err != nil {
+		return nil, fmt.Errorf("employee not found: %w", err)
+	}
+
+	if employee.Status != "active" {
+		return nil, fmt.Errorf("employee %s is %s, cannot enroll device", employee.EmployeeID, employee.Status)
+	}
+
+	if req.Fingerprint != "" {
+		existing, err := s.deviceRepo.GetByFingerprint(ctx, req.Fingerprint, employee.ID)
+		if err == nil && existing != nil {
+			if existing.Status == "active" || existing.Status == "pending" {
+				updates := map[string]interface{}{}
+				if req.Hostname != "" {
+					updates["hostname"] = req.Hostname
+				}
+				if req.OSType != "" {
+					updates["os_type"] = req.OSType
+				}
+				if req.OSVersion != "" {
+					updates["os_version"] = req.OSVersion
+				}
+				if req.CPUInfo != "" {
+					updates["cpu_info"] = req.CPUInfo
+				}
+				if req.RAMInfo != "" {
+					updates["ram_info"] = req.RAMInfo
+				}
+				if req.DiskInfo != "" {
+					updates["disk_info"] = req.DiskInfo
+				}
+				if req.MACAddresses != "" {
+					updates["mac_addresses"] = req.MACAddresses
+				}
+				if req.IPAddresses != "" {
+					updates["ip_addresses"] = req.IPAddresses
+				}
+				if err := s.deviceRepo.UpdateHardwareInfo(ctx, existing.ID, updates); err != nil {
+					return nil, fmt.Errorf("update device hardware info: %w", err)
+				}
+
+				deviceToken := uuid.New().String()
+				response := &domain.EnrollmentResponse{
+					DeviceID:    existing.ID,
+					EmployeeID:  employee.EmployeeID,
+					Employee:    *employee,
+					DeviceToken: deviceToken,
+					Status:      existing.Status,
+					Rules: domain.RuleSetResponse{
+						AppClassifications: []domain.AppClassification{},
+						AlertRules:        []domain.AlertRule{},
+						Policy: domain.Policy{
+							ID:                uuid.New(),
+							TenantID:          employee.CompanyID,
+							UploadInterval:    300,
+							ScreenshotEnabled: false,
+							ScreenshotPolicy:  "metadata_only",
+						},
+					},
+				}
+				return response, nil
+			}
+		}
+	}
+
+	deviceToken := uuid.New().String()
+
+	device := &domain.Device{
+		ID:         uuid.New(),
+		EmployeeID: employee.ID,
+		Hostname:   &req.Hostname,
+		OSType:     req.OSType,
+		OSVersion:  &req.OSVersion,
+		Status:     "active",
+	}
+
+	if req.Hostname == "" {
+		device.Hostname = nil
+	}
+	if req.OSVersion == "" {
+		device.OSVersion = nil
+	}
+
+	if req.Fingerprint != "" {
+		device.Fingerprint = &req.Fingerprint
+	}
+	if req.CPUInfo != "" {
+		device.CPUInfo = &req.CPUInfo
+	}
+	if req.RAMInfo != "" {
+		device.RAMInfo = &req.RAMInfo
+	}
+	if req.DiskInfo != "" {
+		device.DiskInfo = &req.DiskInfo
+	}
+	if req.MACAddresses != "" {
+		device.MACAddresses = &req.MACAddresses
+	}
+	if req.IPAddresses != "" {
+		device.IPAddresses = &req.IPAddresses
+	}
+
+	if err := s.deviceRepo.Create(ctx, device); err != nil {
+		return nil, fmt.Errorf("create device: %w", err)
+	}
+
+	response := &domain.EnrollmentResponse{
+		DeviceID:    device.ID,
+		EmployeeID:  employee.EmployeeID,
+		Employee:    *employee,
+		DeviceToken: deviceToken,
+		Status:      "active",
+		Rules: domain.RuleSetResponse{
+			AppClassifications: []domain.AppClassification{},
+			AlertRules:        []domain.AlertRule{},
+			Policy: domain.Policy{
+				ID:                uuid.New(),
+				TenantID:          employee.CompanyID,
+				UploadInterval:    300,
+				ScreenshotEnabled: false,
+				ScreenshotPolicy:  "metadata_only",
+			},
+		},
+	}
+
+	return response, nil
+}
+
 func setConnectionStatus(devices []domain.Device) {
 	now := time.Now()
 	for i := range devices {

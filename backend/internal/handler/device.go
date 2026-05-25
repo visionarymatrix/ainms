@@ -176,6 +176,57 @@ func ListPendingDevices(svc *service.EnrollmentService) http.HandlerFunc {
 	}
 }
 
+func EnrollWithToken(enrollmentSvc *service.EnrollmentService, tokenSvc *service.InstallTokenService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req domain.TokenEnrollRequest
+		if err := decodeJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		if req.InstallToken == "" {
+			writeError(w, http.StatusBadRequest, "install_token is required")
+			return
+		}
+		if req.OSType == "" {
+			writeError(w, http.StatusBadRequest, "os_type is required")
+			return
+		}
+		if req.Fingerprint == "" {
+			writeError(w, http.StatusBadRequest, "fingerprint is required")
+			return
+		}
+
+		claims, err := tokenSvc.Validate(r.Context(), req.InstallToken)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		enrollReq := domain.EnrollmentRequest{
+			EmployeeID:   claims.EmployeeID,
+			CompanyID:    claims.CompanyID,
+			Hostname:     req.Hostname,
+			OSType:       req.OSType,
+			OSVersion:    req.OSVersion,
+			Fingerprint:  req.Fingerprint,
+			CPUInfo:      req.CPUInfo,
+			RAMInfo:      req.RAMInfo,
+			DiskInfo:     req.DiskInfo,
+			MACAddresses: req.MACAddresses,
+			IPAddresses:  req.IPAddresses,
+		}
+
+		resp, err := enrollmentSvc.EnrollWithToken(r.Context(), enrollReq)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, resp)
+	}
+}
+
 func GetDeviceStatus(svc *service.EnrollmentService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		deviceIDStr := chi.URLParam(r, "deviceID")
