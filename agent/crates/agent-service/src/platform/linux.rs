@@ -10,6 +10,7 @@ const SERVICE_NAME: &str = "ainms-agent";
 const UNIT_FILE: &str = "/etc/systemd/system/ainms-agent.service";
 const INSTALL_DIR: &str = "/usr/local/bin";
 const BIN_NAME: &str = "ainms-agent";
+const CONFIG_PATH: &str = "/etc/ainms/agent.conf";
 
 fn installed_bin_path() -> String {
     format!("{}/{}", INSTALL_DIR, BIN_NAME)
@@ -69,12 +70,13 @@ fn unit_content() -> String {
          Wants=network-online.target\n\n\
          [Service]\n\
          Type=simple\n\
-         ExecStart={exe} --run-as-service\n\
+         ExecStart={exe} --run-as-service --config {config}\n\
          Restart=on-failure\n\
          RestartSec=5\n\n\
          [Install]\n\
          WantedBy=multi-user.target\n",
-        exe = exe
+        exe = exe,
+        config = CONFIG_PATH
     )
 }
 

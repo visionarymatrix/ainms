@@ -19,6 +19,7 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 const SERVICE_NAME: &str = "AINMSAgent";
 const INSTALL_DIR: &str = r"C:\Program Files\AINMS\Agent";
 const BIN_NAME: &str = "agent-core.exe";
+const CONFIG_PATH: &str = r"C:\ProgramData\AINMS\agent.conf";
 
 fn installed_bin_path() -> String {
     format!(r"{}\{}", INSTALL_DIR, BIN_NAME)
@@ -99,7 +100,7 @@ pub fn install() -> Result<()> {
         start_type: ServiceStartType::AutoStart,
         error_control: ServiceErrorControl::Normal,
         executable_path: exe_path,
-        launch_arguments: vec![OsString::from("--run-as-service")],
+        launch_arguments: vec![OsString::from("--run-as-service"), OsString::from("--config"), OsString::from(CONFIG_PATH)],
         dependencies: vec![],
         account_name: None,
         account_password: None,

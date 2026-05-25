@@ -10,6 +10,7 @@ const SERVICE_NAME: &str = "io.ainms.agent";
 const PLIST_PATH: &str = "/Library/LaunchDaemons/io.ainms.agent.plist";
 const INSTALL_DIR: &str = "/usr/local/bin";
 const BIN_NAME: &str = "ainms-agent";
+const CONFIG_PATH: &str = "/etc/ainms/agent.conf";
 
 fn installed_bin_path() -> String {
     format!("{}/{}", INSTALL_DIR, BIN_NAME)
@@ -73,6 +74,8 @@ fn plist_content() -> String {
            <array>\n\
              <string>{exe}</string>\n\
              <string>--run-as-service</string>\n\
+             <string>--config</string>\n\
+             <string>{config}</string>\n\
            </array>\n\
            <key>RunAtLoad</key>\n\
            <true/>\n\
@@ -85,7 +88,8 @@ fn plist_content() -> String {
          </dict>\n\
          </plist>",
         name = SERVICE_NAME,
-        exe = exe
+        exe = exe,
+        config = CONFIG_PATH
     )
 }
 
