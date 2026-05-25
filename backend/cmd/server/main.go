@@ -51,11 +51,13 @@ func main() {
 	deviceRepo := postgres.NewDeviceRepo(pgPool)
 	userRepo := postgres.NewUserRepo(pgPool)
 	tenantRepo := postgres.NewTenantRepo(pgPool)
+	installTokenRepo := postgres.NewInstallTokenRepo(pgPool)
 	eventRepo := clickhouse.NewEventRepo(pgPool)
 
 	companySvc := service.NewCompanyService(companyRepo)
 	employeeSvc := service.NewEmployeeService(employeeRepo)
 	enrollmentSvc := service.NewEnrollmentService(employeeRepo, deviceRepo)
+	installTokenSvc := service.NewInstallTokenService(installTokenRepo, employeeRepo)
 	authSvc := service.NewAuthService(userRepo, companyRepo, tenantRepo)
 
 	if err := authSvc.SeedSuperAdmin(ctx); err != nil {
@@ -86,12 +88,18 @@ func main() {
 	r.Post("/v1/auth/login", handler.Login(authSvc))
 	r.Post("/v1/auth/register", handler.RegisterCompany(authSvc))
 
+	// Public: token-based enrollment (install_token is the auth)
+	r.Post("/v1/enroll/token", handler.EnrollWithToken(enrollmentSvc, installTokenSvc))
+
+	// Public: install script for curl|sh
+	r.Get("/v1/install.sh", handler.InstallShellScript())
+
 	// Public device status endpoint (agent polls without auth)
 	r.Get("/v1/devices/{deviceID}/status", handler.GetDeviceStatus(enrollmentSvc))
 
 	// Protected routes
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.Authenticator)
+		r.Use(middleware.Authenticator(installTokenSvc))
 
 		r.Get("/v1/auth/me", handler.GetCurrentUser(authSvc))
 
@@ -102,12 +110,18 @@ func main() {
 
 			r.Post("/companies/{companyID}/employees", handler.RegisterEmployee(employeeSvc))
 			r.Get("/employees/{employeeID}", handler.GetEmployee(employeeSvc))
+			r.Get("/employees/{employeeID}/devices", handler.GetEmployeeDevices(deviceRepo))
+			r.Post("/employees/{employeeID}/install-token", handler.GenerateEmployeeInstallToken(installTokenSvc, employeeSvc))
 			r.Get("/companies/{companyID}/employees", handler.ListEmployees(employeeSvc))
 			r.Patch("/employees/{employeeID}", handler.UpdateEmployee(employeeSvc))
 			r.Delete("/employees/{employeeID}", handler.DeactivateEmployee(employeeSvc))
 
 			r.Post("/enroll", handler.EnrollDevice(enrollmentSvc))
 			r.Put("/devices/{deviceID}/heartbeat", handler.DeviceHeartbeat(enrollmentSvc))
+
+			r.Post("/install-tokens", handler.GenerateInstallToken(installTokenSvc))
+			r.Get("/install-tokens", handler.ListInstallTokens(installTokenSvc))
+			r.Delete("/install-tokens/{tokenID}", handler.RevokeInstallToken(installTokenSvc))
 
 			r.Post("/devices/{deviceID}/approve", handler.ApproveDevice(enrollmentSvc))
 			r.Post("/devices/{deviceID}/reject", handler.RejectDevice(enrollmentSvc))
