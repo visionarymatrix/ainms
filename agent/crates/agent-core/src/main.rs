@@ -586,9 +586,8 @@ async fn collect_loop(
             }
         }
 
-        let procs = agent_collectors::get_running_applications_with_cpu_cache(cpu_cache.as_ref());
-        let new_cache = agent_collectors::build_cpu_cache(&procs);
-        cpu_cache = Some(new_cache);
+        let procs = agent_collectors::get_running_applications();
+        cpu_cache = None;
 
         let mut process_events = Vec::new();
         for proc_info in &procs {

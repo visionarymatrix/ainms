@@ -1,6 +1,10 @@
 use agent_collectors::{
-    build_cpu_cache, get_active_window, get_idle_seconds, get_running_applications,
-    get_running_applications_with_cpu_cache, ProcessInfo,
+    get_active_window, get_idle_seconds, get_running_applications,
+    ProcessInfo,
+};
+#[cfg(target_os = "linux")]
+use agent_collectors::{
+    build_cpu_cache, get_running_applications_with_cpu_cache,
 };
 use agent_screenshot::ScreenshotCommander;
 use std::time:: Duration;
@@ -212,8 +216,36 @@ fn test_running_applications() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn test_cpu_cache() {
     let first = get_running_applications();
+    std::thread::sleep(Duration::from_secs(2));
+    let cache = build_cpu_cache(&first);
+    let second = get_running_applications_with_cpu_cache(Some(&cache));
+
+    let with_cpu: Vec<&ProcessInfo> = second.iter().filter(|p| p.cpu_percent > 0.0).collect();
+    check_passed(&format!(
+        "cpu_cache → {} of {} processes have CPU% > 0 (delta-based)",
+        with_cpu.len(),
+        second.len()
+    ));
+
+    if !with_cpu.is_empty() {
+        println!("  Top CPU consumers:");
+        let mut sorted = with_cpu.clone();
+        sorted.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap_or(std::cmp::Ordering::Equal));
+        for p in sorted.iter().take(5) {
+            println!("    {:<20} {:.1}%", truncate(&p.name, 20), p.cpu_percent);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn test_cpu_cache() {
+    check_warn("cpu_cache — skipped on non-Linux OS");
+}
+
+#[cfg(target_os = "linux")]    let first = get_running_applications();
     std::thread::sleep(Duration::from_secs(2));
     let cache = build_cpu_cache(&first);
     let second = get_running_applications_with_cpu_cache(Some(&cache));
