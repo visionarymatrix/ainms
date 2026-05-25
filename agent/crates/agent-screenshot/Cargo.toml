@@ -10,3 +10,14 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 agent-proto = { workspace = true }
 agent-comms = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Gdi",
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+png = "0.17"
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
