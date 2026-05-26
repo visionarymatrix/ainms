@@ -52,6 +52,8 @@ func main() {
 	userRepo := postgres.NewUserRepo(pgPool)
 	tenantRepo := postgres.NewTenantRepo(pgPool)
 	installTokenRepo := postgres.NewInstallTokenRepo(pgPool)
+	screenshotRepo := postgres.NewScreenshotRepo(pgPool)
+	commandRepo := postgres.NewCommandRepo(pgPool)
 	eventRepo := clickhouse.NewEventRepo(pgPool)
 
 	companySvc := service.NewCompanyService(companyRepo)
@@ -59,11 +61,16 @@ func main() {
 	enrollmentSvc := service.NewEnrollmentService(employeeRepo, deviceRepo)
 	installTokenSvc := service.NewInstallTokenService(installTokenRepo, employeeRepo)
 	authSvc := service.NewAuthService(userRepo, companyRepo, tenantRepo)
+	screenshotSvc := service.NewScreenshotService(screenshotRepo, commandRepo, deviceRepo, "public/screenshots")
 
 	if err := authSvc.SeedSuperAdmin(ctx); err != nil {
 		log.Printf("warning: failed to seed super admin: %v", err)
 	} else {
 		log.Println("super admin seeded successfully")
+	}
+
+	if err := os.MkdirAll("public/screenshots", 0755); err != nil {
+		log.Printf("warning: failed to create screenshots directory: %v", err)
 	}
 
 	r := chi.NewRouter()
@@ -142,10 +149,16 @@ func main() {
 			r.Get("/devices/{deviceID}/events", handler.GetDeviceEvents(eventRepo))
 
 			r.Get("/devices/status", handler.DeviceFleetStatus(enrollmentSvc))
-			r.Post("/screenshot/request", handler.RequestScreenshot(nil))
-			r.Post("/screenshot/upload", handler.UploadScreenshot(nil))
 
-			r.Get("/commands", handler.WebSocketCommands(nil))
+			// Screenshot: admin requests, agent uploads, admin views
+			r.Post("/screenshot/request", handler.RequestScreenshot(screenshotSvc))
+			r.Post("/screenshot/upload", handler.UploadScreenshot(screenshotSvc))
+			r.Get("/devices/{deviceID}/screenshots", handler.GetDeviceScreenshots(screenshotSvc))
+			r.Get("/screenshots/{requestID}/image", handler.GetScreenshotImage(screenshotSvc))
+
+			// Agent commands: agent polls for pending commands
+			r.Get("/devices/{deviceID}/commands", handler.GetPendingCommands(screenshotSvc))
+			r.Post("/commands/ack", handler.AcknowledgeCommand(screenshotSvc))
 		})
 	})
 
