@@ -29,6 +29,18 @@ export interface Device {
   updated_at: string;
 }
 
+export interface ScreenshotRequest {
+  id: string;
+  device_id: string;
+  requested_by: string;
+  reason: string;
+  policy: string;
+  status: string;
+  image_path: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
 export async function listEmployees(companyId: string): Promise<Employee[]> {
   return api.get<Employee[]>(`/v1/companies/${companyId}/employees`);
 }
@@ -50,4 +62,16 @@ export async function registerEmployee(
 
 export async function deactivateEmployee(id: string): Promise<void> {
   return api.delete(`/v1/employees/${id}`);
+}
+
+export async function requestScreenshot(deviceId: string): Promise<ScreenshotRequest> {
+  return api.post<ScreenshotRequest>('/v1/screenshot/request', {
+    device_id: deviceId,
+    reason: 'On-demand screenshot',
+    policy: 'upload_image',
+  });
+}
+
+export async function getDeviceScreenshots(deviceId: string): Promise<ScreenshotRequest[]> {
+  return api.get<ScreenshotRequest[]>(`/v1/devices/${deviceId}/screenshots`);
 }
