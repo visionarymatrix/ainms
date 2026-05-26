@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -205,6 +206,29 @@ type ScreenshotUpload struct {
 	Confidence  float64   `json:"confidence"`
 	ImageURL    *string   `json:"image_url"`
 	UploadedAt  time.Time `json:"uploaded_at"`
+}
+
+type ScreenshotRequestDB struct {
+	ID          uuid.UUID  `json:"id" db:"id"`
+	DeviceID    uuid.UUID  `json:"device_id" db:"device_id"`
+	RequestedBy uuid.UUID  `json:"requested_by" db:"requested_by"`
+	Reason      string     `json:"reason" db:"reason"`
+	Policy      string     `json:"policy" db:"policy"`
+	Status      string     `json:"status" db:"status"`
+	ImagePath   *string    `json:"image_path" db:"image_path"`
+	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
+	CompletedAt *time.Time `json:"completed_at" db:"completed_at"`
+}
+
+type PendingCommandDB struct {
+	ID          uuid.UUID       `json:"id" db:"id"`
+	DeviceID    uuid.UUID       `json:"device_id" db:"device_id"`
+	CommandType string          `json:"command_type" db:"command_type"`
+	Payload     json.RawMessage `json:"payload" db:"payload"`
+	Status      string          `json:"status" db:"status"`
+	CreatedAt   time.Time       `json:"created_at" db:"created_at"`
+	SentAt      *time.Time      `json:"sent_at" db:"sent_at"`
+	AckedAt     *time.Time      `json:"acked_at" db:"acked_at"`
 }
 
 // InstallToken represents a permanent auth token for agent installation and API access.

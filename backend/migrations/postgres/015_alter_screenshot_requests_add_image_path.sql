@@ -1,0 +1,1 @@
+ALTER TABLE screenshot_requests ADD COLUMN IF NOT EXISTS image_path TEXT;
