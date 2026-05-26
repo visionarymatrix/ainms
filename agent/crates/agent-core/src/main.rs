@@ -20,6 +20,7 @@ use agent_proto::events::{
     AppUsageEventMeta, AppUsageSummary, BulkEventRequest, EnrollmentResponse,
     PendingCommand, TokenEnrollRequest,
 };
+use agent_comms::socket::{self, SocketCommand};
 
 use config::{default_config_path, load_state, save_state, AgentStateFile, AgentStateSection};
 
@@ -379,27 +380,6 @@ async fn heartbeat_loop(
                 info!(device_id, "Heartbeat OK");
                 let mut s = state.lock().await;
                 s.consecutive_heartbeat_failures = 0;
-                drop(s);
-
-                if let Ok(commands) = poll_commands(&client, &cfg.server, &device_id, &install_token).await {
-                    for cmd in &commands {
-                        if cmd.command_type == "screenshot_request" {
-                            info!(command_id = %cmd.id, "Received screenshot request command");
-                            let cmd_client = client.clone();
-                            let cmd_server = cfg.server.clone();
-                            let cmd_device_id = device_id.clone();
-                            let cmd_install_token = install_token.clone();
-                            let cmd_clone = cmd.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = handle_screenshot_request(
-                                    &cmd_client, &cmd_server, &cmd_device_id, &cmd_install_token, &cmd_clone,
-                                ).await {
-                                    error!("Failed to handle screenshot request: {}", e);
-                                }
-                            });
-                        }
-                    }
-                }
             }
             Ok(resp) if resp.status().as_u16() == 403 => {
                 warn!("Heartbeat got 403 (device not approved), will re-enroll");
@@ -831,6 +811,7 @@ async fn send_bulk_event(
     }
 }
 
+#[allow(dead_code)]
 async fn poll_commands(
     client: &reqwest::Client,
     server: &str,
@@ -922,6 +903,56 @@ async fn handle_screenshot_request(
     Ok(())
 }
 
+async fn socket_command_loop(
+    mut cmd_rx: tokio::sync::mpsc::Receiver<SocketCommand>,
+    client: reqwest::Client,
+    server: &str,
+    device_id: &str,
+    install_token: &str,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(SocketCommand::ScreenshotRequest { command_id, payload }) => {
+                        info!(command_id = %command_id, "Processing screenshot_request from Socket.IO");
+                        let pending_cmd = PendingCommand {
+                            id: command_id,
+                            device_id: device_id.to_string(),
+                            command_type: "screenshot_request".to_string(),
+                            payload,
+                            status: "pending".to_string(),
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                        };
+                        let cmd_client = client.clone();
+                        let cmd_server = server.to_string();
+                        let cmd_device_id = device_id.to_string();
+                        let cmd_install_token = install_token.to_string();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_screenshot_request(
+                                &cmd_client, &cmd_server, &cmd_device_id, &cmd_install_token, &pending_cmd,
+                            ).await {
+                                error!("Failed to handle screenshot request: {}", e);
+                            }
+                        });
+                    }
+                    None => {
+                        info!("Socket command channel closed");
+                        return;
+                    }
+                }
+            }
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    info!("Socket command loop shutting down");
+                    return;
+                }
+            }
+        }
+    }
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
@@ -950,7 +981,7 @@ fn main() -> Result<()> {
         {
             agent_service::set_agent_runner(Box::new(|| {
                 let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-                rt.block_on(run_agent());
+                let _ = rt.block_on(run_agent());
             }));
             return agent_service::run_service();
         }
@@ -997,6 +1028,27 @@ async fn run_agent() -> Result<()> {
     }));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let mut socket_cmd_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut socket_client_ref: Option<socket::SocketClient> = None;
+
+    match socket::connect_socket(&cfg.server, &device_id, &install_token).await {
+        Ok((sc, cmd_rx)) => {
+            info!("Socket.IO connected");
+            let cmd_client = client.clone();
+            let cmd_server = cfg.server.clone();
+            let cmd_install_token = install_token.clone();
+            let cmd_device_id = device_id.clone();
+            let cmd_shutdown = shutdown_rx.clone();
+            socket_cmd_handle = Some(tokio::spawn(async move {
+                socket_command_loop(cmd_rx, cmd_client, &cmd_server, &cmd_device_id, &cmd_install_token, cmd_shutdown).await;
+            }));
+            socket_client_ref = Some(sc);
+        }
+        Err(e) => {
+            warn!("Socket.IO connection failed, commands will not be received in real-time: {}", e);
+        }
+    }
 
     info!("Starting heartbeat, collector, and uploader loops...");
 
@@ -1054,11 +1106,20 @@ async fn run_agent() -> Result<()> {
         }
     }
 
+    if let Some(sc) = socket_client_ref {
+        if let Err(e) = sc.disconnect().await {
+            warn!("Socket.IO disconnect error: {}", e);
+        }
+    }
+
     tokio::time::sleep(Duration::from_millis(500)).await;
     heartbeat_handle.abort();
     collect_handle.abort();
     upload_handle.abort();
     screenshot_handle.abort();
+    if let Some(h) = socket_cmd_handle {
+        h.abort();
+    }
 
     info!("AINMS Agent stopped.");
     Ok(())

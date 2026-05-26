@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -49,6 +49,7 @@ import { toast } from "sonner";
 import { getUser, getCompanyId, getToken } from "@/lib/auth/session";
 import { listEmployees, registerEmployee, deactivateEmployee, getEmployeeDevices, requestScreenshot, getDeviceScreenshots, type Employee, type Device, type ScreenshotRequest } from "@/lib/api/employees";
 import { getEmployeeInstallToken, type EmployeeInstallToken } from "@/lib/api/install-tokens";
+import { useSocket } from "@/lib/socket";
 
 const statusBadge: Record<string, "default" | "destructive" | "outline"> = {
   active: "default",
@@ -129,6 +130,8 @@ function EmployeeDetailDialog({ employee, open, onOpenChange, onDeactivate }: Em
   const [screenshotRequesting, setScreenshotRequesting] = useState<string | null>(null);
   const [viewingScreenshot, setViewingScreenshot] = useState<ScreenshotRequest | null>(null);
 
+  const { on } = useSocket(getToken());
+
   const fetchDevices = useCallback(async () => {
     if (!employee) return;
     setDevicesLoading(true);
@@ -180,18 +183,54 @@ function EmployeeDetailDialog({ employee, open, onOpenChange, onDeactivate }: Em
     }
   }, [employee, devices]);
 
+  const pendingRequestIds = useRef<Record<string, string>>({});
+
   const handleTakeScreenshot = useCallback(async (deviceId: string) => {
     setScreenshotRequesting(deviceId);
     try {
-      await requestScreenshot(deviceId);
+      const req = await requestScreenshot(deviceId);
+      const requestId = req.id;
+      pendingRequestIds.current[deviceId] = requestId;
       toast.success("Screenshot requested");
-      await fetchScreenshots();
+
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(async () => {
+          try {
+            const data = await getDeviceScreenshots(deviceId);
+            if (data && data.length > 0) {
+              const completed = data.find((s) => s.id === requestId && s.status === "completed" && s.image_path);
+              if (completed) {
+                setScreenshots((prev) => {
+                  const filtered = prev.filter((s) => s.id !== completed.id);
+                  const updated = [completed, ...filtered];
+                  updated.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+                  return updated.slice(0, 6);
+                });
+                toast.success("Screenshot captured!");
+              }
+            }
+          } catch {
+            toast.warning("Screenshot timeout. Agent may not have responded.");
+          } finally {
+            resolve();
+          }
+        }, 60000);
+
+        const checkSocket = setInterval(() => {
+          if (!pendingRequestIds.current[deviceId]) {
+            clearTimeout(timeout);
+            clearInterval(checkSocket);
+            resolve();
+          }
+        }, 500);
+      });
     } catch {
       toast.error("Failed to request screenshot");
     } finally {
+      delete pendingRequestIds.current[deviceId];
       setScreenshotRequesting(null);
     }
-  }, [fetchScreenshots]);
+  }, []);
 
   useEffect(() => {
     if (open && employee) {
@@ -216,15 +255,34 @@ function EmployeeDetailDialog({ employee, open, onOpenChange, onDeactivate }: Em
   }, [open]);
 
   useEffect(() => {
-    if (!open || !employee) return;
-    const hasPending = screenshots.some(ss => ss.status === 'pending');
-    if (!hasPending) return;
-    
-    const interval = setInterval(() => {
+    const offOnline = on("device_online", (data: { device_id: string }) => {
+      setDevices((prev) =>
+        prev.map((d) =>
+          d.id === data.device_id
+            ? { ...d, connection_status: "online" as const, last_heartbeat: new Date().toISOString() }
+            : d
+        )
+      );
+    });
+    const offOffline = on("device_offline", (data: { device_id: string }) => {
+      setDevices((prev) =>
+        prev.map((d) =>
+          d.id === data.device_id
+            ? { ...d, connection_status: "offline" as const }
+            : d
+        )
+      );
+    });
+    const offScreenshotReady = on("screenshot_ready", (data: { request_id: string; device_id: string; status: string; image_path: string }) => {
+      delete pendingRequestIds.current[data.device_id];
       fetchScreenshots();
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [open, employee, screenshots, fetchScreenshots]);
+    });
+    return () => {
+      offOnline();
+      offOffline();
+      offScreenshotReady();
+    };
+  }, [on, fetchScreenshots]);
 
   if (!employee) return null;
 
@@ -562,6 +620,9 @@ export default function EmployeesPage() {
   const user = getUser();
   const companyId = getCompanyId();
 
+  const token = getToken();
+  const { isConnected } = useSocket(token);
+
   useEffect(() => {
     if (companyId) {
       fetchEmployees();
@@ -653,64 +714,74 @@ export default function EmployeesPage() {
               Manage employees in your company.
             </p>
           </div>
-          <div className="flex gap-2">
-            <Button asChild variant="outline">
-              <Link href="/employees/new">
-                <Plus className="mr-2 h-4 w-4" />
-                New Employee
-              </Link>
-            </Button>
-            <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-              <DialogTrigger asChild>
-                <Button>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span className={`relative inline-flex h-2 w-2 rounded-full ${isConnected ? "bg-emerald-500" : "bg-red-500"}`}>
+                {isConnected && (
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-40" />
+                )}
+              </span>
+              {isConnected ? "Socket connected" : "Socket disconnected"}
+            </div>
+            <div className="flex gap-2">
+              <Button asChild variant="outline">
+                <Link href="/employees/new">
                   <Plus className="mr-2 h-4 w-4" />
-                  Quick Add
-                </Button>
-              </DialogTrigger>
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>Add Employee</DialogTitle>
-                  <DialogDescription>
-                    Register a new employee in your company.
-                  </DialogDescription>
-                </DialogHeader>
-                <form onSubmit={handleAddEmployee} className="flex flex-col gap-4">
-                  <div className="flex flex-col gap-2">
-                    <Label htmlFor="first-name">First Name</Label>
-                    <Input
-                      id="first-name"
-                      value={firstName}
-                      onChange={(e) => setFirstName(e.target.value)}
-                      placeholder="Jane"
-                      required
-                    />
-                  </div>
-                  <div className="flex flex-col gap-2">
-                    <Label htmlFor="last-name">Last Name</Label>
-                    <Input
-                      id="last-name"
-                      value={lastName}
-                      onChange={(e) => setLastName(e.target.value)}
-                      placeholder="Doe"
-                      required
-                    />
-                  </div>
-                  <div className="flex flex-col gap-2">
-                    <Label htmlFor="emp-email">Email (optional)</Label>
-                    <Input
-                      id="emp-email"
-                      type="email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="jane@acme.com"
-                    />
-                  </div>
-                  <Button type="submit" disabled={creating}>
-                    {creating ? "Adding..." : "Add Employee"}
+                  New Employee
+                </Link>
+              </Button>
+              <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+                <DialogTrigger asChild>
+                  <Button>
+                    <Plus className="mr-2 h-4 w-4" />
+                    Quick Add
                   </Button>
-                </form>
-              </DialogContent>
-            </Dialog>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>Add Employee</DialogTitle>
+                    <DialogDescription>
+                      Register a new employee in your company.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <form onSubmit={handleAddEmployee} className="flex flex-col gap-4">
+                    <div className="flex flex-col gap-2">
+                      <Label htmlFor="first-name">First Name</Label>
+                      <Input
+                        id="first-name"
+                        value={firstName}
+                        onChange={(e) => setFirstName(e.target.value)}
+                        placeholder="Jane"
+                        required
+                      />
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <Label htmlFor="last-name">Last Name</Label>
+                      <Input
+                        id="last-name"
+                        value={lastName}
+                        onChange={(e) => setLastName(e.target.value)}
+                        placeholder="Doe"
+                        required
+                      />
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <Label htmlFor="emp-email">Email (optional)</Label>
+                      <Input
+                        id="emp-email"
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="jane@acme.com"
+                      />
+                    </div>
+                    <Button type="submit" disabled={creating}>
+                      {creating ? "Adding..." : "Add Employee"}
+                    </Button>
+                  </form>
+                </DialogContent>
+              </Dialog>
+            </div>
           </div>
         </div>
         <Card>

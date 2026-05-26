@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -34,8 +34,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api/client";
-import { getUser } from "@/lib/auth/session";
+import { getUser, getToken } from "@/lib/auth/session";
 import { requestScreenshot, getDeviceScreenshots, type ScreenshotRequest } from "@/lib/api/employees";
+import { useSocket } from "@/lib/socket";
 import {
   CheckCircle,
   XCircle,
@@ -149,6 +150,9 @@ export default function DevicesPage() {
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const user = getUser();
 
+  const token = getToken();
+  const { isConnected, on } = useSocket(token);
+
   const fetchEmployees = useCallback(async () => {
     if (!user?.company_id) return;
     try {
@@ -206,6 +210,56 @@ export default function DevicesPage() {
     return () => clearInterval(interval);
   }, [fetchDevices]);
 
+  useEffect(() => {
+    const offOnline = on("device_online", (data: { device_id: string }) => {
+      setDevices((prev) =>
+        prev.map((d) =>
+          d.id === data.device_id
+            ? { ...d, connection_status: "online" as const, last_heartbeat: new Date().toISOString() }
+            : d
+        )
+      );
+    });
+    const offOffline = on("device_offline", (data: { device_id: string }) => {
+      setDevices((prev) =>
+        prev.map((d) =>
+          d.id === data.device_id
+            ? { ...d, connection_status: "offline" as const }
+            : d
+        )
+      );
+    });
+    const offScreenshotReady = on(
+      "screenshot_ready",
+      (data: { request_id: string; device_id: string; status: string; image_path: string }) => {
+        const completed: ScreenshotRequest = {
+          id: data.request_id,
+          device_id: data.device_id,
+          requested_by: "",
+          reason: "",
+          policy: "",
+          status: data.status,
+          image_path: data.image_path,
+          created_at: new Date().toISOString(),
+          completed_at: new Date().toISOString(),
+        };
+        setCompletedScreenshots((prev) => ({ ...prev, [data.device_id]: completed }));
+        setPendingScreenshots((prev) => {
+          const next = { ...prev };
+          delete next[data.device_id];
+          return next;
+        });
+        setScreenshotLoading((prev) => ({ ...prev, [data.device_id]: false }));
+        toast.success("Screenshot captured and uploaded!");
+      }
+    );
+    return () => {
+      offOnline();
+      offOffline();
+      offScreenshotReady();
+    };
+  }, [on]);
+
   async function handleApprove(deviceId: string) {
     setActionLoading((prev) => ({ ...prev, [deviceId]: true }));
     try {
@@ -241,43 +295,53 @@ export default function DevicesPage() {
     setRejectDialogOpen(true);
   }
 
+  const pendingRequestIds = useRef<Record<string, string>>({});
+
   async function handleTakeScreenshot(deviceId: string) {
     setScreenshotLoading((prev) => ({ ...prev, [deviceId]: true }));
     setPendingScreenshots((prev) => ({ ...prev, [deviceId]: "requested" }));
     try {
       const req = await requestScreenshot(deviceId);
       const requestId = req.id;
+      pendingRequestIds.current[deviceId] = requestId;
       setPendingScreenshots((prev) => ({ ...prev, [deviceId]: "capturing" }));
       toast.info("Screenshot requested — waiting for agent to capture...");
 
-      // Poll until completed (max 60s, check every 3s)
-      const maxAttempts = 20;
-      let found = false;
-      for (let i = 0; i < maxAttempts; i++) {
-        await new Promise((r) => setTimeout(r, 3000));
-        try {
-          const screenshots = await getDeviceScreenshots(deviceId);
-          const completed = screenshots.find((s) => s.id === requestId && s.status === "completed" && s.image_path);
-          if (completed) {
-            setCompletedScreenshots((prev) => ({ ...prev, [deviceId]: completed }));
-            setPendingScreenshots((prev) => {
-              const next = { ...prev };
-              delete next[deviceId];
-              return next;
-            });
-            toast.success("Screenshot captured and uploaded!");
-            found = true;
-            break;
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(async () => {
+          try {
+            const screenshots = await getDeviceScreenshots(deviceId);
+            const completed = screenshots.find(
+              (s) => s.id === requestId && s.status === "completed" && s.image_path
+            );
+            if (completed) {
+              setCompletedScreenshots((prev) => ({ ...prev, [deviceId]: completed }));
+              setPendingScreenshots((prev) => {
+                const next = { ...prev };
+                delete next[deviceId];
+                return next;
+              });
+              toast.success("Screenshot captured and uploaded!");
+            } else {
+              setPendingScreenshots((prev) => ({ ...prev, [deviceId]: "timeout" }));
+              toast.warning("Screenshot request sent, but agent hasn't responded yet. Check back later.");
+            }
+          } catch {
+            setPendingScreenshots((prev) => ({ ...prev, [deviceId]: "timeout" }));
+            toast.warning("Screenshot request sent, but agent hasn't responded yet. Check back later.");
           }
-        } catch {
-          // Network error during polling, keep trying
-        }
-      }
+          resolve();
+        }, 60000);
 
-      if (!found) {
-        setPendingScreenshots((prev) => ({ ...prev, [deviceId]: "timeout" }));
-        toast.warning("Screenshot request sent, but agent hasn't responded yet. Check back later.");
-      }
+
+        const checkSocket = setInterval(() => {
+          if (!pendingRequestIds.current[deviceId]) {
+            clearTimeout(timeout);
+            clearInterval(checkSocket);
+            resolve();
+          }
+        }, 500);
+      });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to request screenshot");
       setPendingScreenshots((prev) => {
@@ -286,13 +350,14 @@ export default function DevicesPage() {
         return next;
       });
     } finally {
+      delete pendingRequestIds.current[deviceId];
       setScreenshotLoading((prev) => ({ ...prev, [deviceId]: false }));
     }
   }
 
   function getScreenshotImageUrl(requestId: string): string {
-    const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : "";
-    return `/api/screenshots/${requestId}?token=${encodeURIComponent(token)}`;
+    const t = typeof window !== "undefined" ? localStorage.getItem("token") || "" : "";
+    return `/api/screenshots/${requestId}?token=${encodeURIComponent(t)}`;
   }
 
   function toggleRow(deviceId: string) {
@@ -315,11 +380,23 @@ export default function DevicesPage() {
   return (
     <TooltipProvider delayDuration={200}>
       <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Devices</h1>
-          <p className="text-muted-foreground">
-            Monitor and manage enrolled devices across your organization.
-          </p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Devices</h1>
+            <p className="text-muted-foreground">
+              Monitor and manage enrolled devices across your organization.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span className={`relative inline-flex h-2 w-2 rounded-full ${isConnected ? "bg-emerald-500" : "bg-red-500"}`}>
+                {isConnected && (
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-40" />
+                )}
+              </span>
+              {isConnected ? "Socket connected" : "Socket disconnected"}
+            </div>
+          </div>
         </div>
 
         <div className="grid gap-4 md:grid-cols-4">
@@ -805,7 +882,7 @@ export default function DevicesPage() {
                                   )}
                                 </div>
 
-                                {/* Screenshot result section */}
+
                                 {(completedScreenshots[device.id] || pendingScreenshots[device.id]) && (
                                   <div className="mt-4 pt-4 border-t">
                                     <h4 className="font-semibold text-sm flex items-center gap-2 mb-2">

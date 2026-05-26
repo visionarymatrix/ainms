@@ -18,6 +18,9 @@ import (
 	"github.com/ainms/gateway/internal/service"
 	redisstore "github.com/ainms/gateway/internal/store/redis"
 
+	socketio "github.com/zishang520/socket.io/servers/socket/v3"
+	"github.com/zishang520/socket.io/v3/pkg/types"
+
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
@@ -62,6 +65,21 @@ func main() {
 	installTokenSvc := service.NewInstallTokenService(installTokenRepo, employeeRepo)
 	authSvc := service.NewAuthService(userRepo, companyRepo, tenantRepo)
 	screenshotSvc := service.NewScreenshotService(screenshotRepo, commandRepo, deviceRepo, "public/screenshots")
+
+	socketOpts := socketio.DefaultServerOptions()
+	socketOpts.SetCors(&types.Cors{
+		Origin:      []string{"http://173.249.47.143:3440", "http://localhost:3440"},
+		Methods:     []string{"GET", "POST"},
+		Credentials: true,
+	})
+	socketOpts.SetTransports(types.NewSet(socketio.Polling, socketio.WebSocket))
+
+	sio := socketio.NewServer(nil, socketOpts)
+
+	socketHub := service.NewSocketHub(sio)
+
+	socketHandler := handler.NewSocketHandler(socketHub, installTokenSvc, authSvc, enrollmentSvc, screenshotSvc)
+	socketHandler.RegisterEvents(sio)
 
 	if err := authSvc.SeedSuperAdmin(ctx); err != nil {
 		log.Printf("warning: failed to seed super admin: %v", err)
@@ -163,9 +181,14 @@ func main() {
 	})
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
+
+	mux := http.NewServeMux()
+	mux.Handle("/socketio/", sio.ServeHandler(nil))
+	mux.Handle("/", r)
+
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      r,
+		Handler:      mux,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -183,6 +206,8 @@ func main() {
 
 	<-done
 	log.Println("shutting down...")
+
+	sio.Close(nil)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
