@@ -12,4 +12,5 @@ pub struct ProcessInfo {
     pub cmdline: String,
     pub cpu_percent: f64,
     pub memory_kb: u64,
+    pub is_user_facing: bool,
 }

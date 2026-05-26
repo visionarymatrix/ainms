@@ -70,6 +70,7 @@ pub async fn connect_socket(
         .on("screenshot_request", move |payload: Payload, _| {
             let tx = tx_event.clone();
             async move {
+                info!("Socket.IO screenshot_request callback fired");
                 parse_screenshot_request(payload, &tx);
             }
             .boxed()

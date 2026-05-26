@@ -192,3 +192,46 @@ pub struct PendingCommand {
     pub status: String,
     pub created_at: String,
 }
+
+// ── Network traffic monitoring events ────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkConnection {
+    pub protocol: String,
+    pub local_ip: String,
+    pub local_port: u16,
+    pub remote_ip: String,
+    pub remote_port: u16,
+    pub state: String,
+    // 0 if unknown
+    pub process_id: i32,
+    // empty string if unknown
+    pub process_name: String,
+    pub remote_hostname: Option<String>,
+    pub reconstructed_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkTrafficEvent {
+    pub device_id: String,
+    pub timestamp: DateTime<Utc>,
+    pub connections: Vec<NetworkConnection>,
+    pub unresolved_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkTrafficSummary {
+    pub device_id: String,
+    pub total_connections: u32,
+    pub resolved_connections: u32,
+    pub unique_domains: Vec<String>,
+    // e.g. {"tcp": N, "udp": M}
+    pub protocol_breakdown: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkNetworkEventRequest {
+    pub device_id: String,
+    pub summary: NetworkTrafficSummary,
+    pub connections: Vec<NetworkConnection>,
+}

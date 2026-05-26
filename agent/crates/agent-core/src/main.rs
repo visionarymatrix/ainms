@@ -4,6 +4,7 @@ pub(crate) mod os;
 mod rule_engine;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,8 +18,9 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use agent_proto::events::{
-    AppUsageEventMeta, AppUsageSummary, BulkEventRequest, EnrollmentResponse,
-    PendingCommand, TokenEnrollRequest,
+    AppUsageEventMeta, AppUsageSummary, BulkEventRequest, BulkNetworkEventRequest,
+    EnrollmentResponse, NetworkConnection, NetworkTrafficSummary, PendingCommand,
+    TokenEnrollRequest,
 };
 use agent_comms::socket::{self, SocketCommand};
 
@@ -32,6 +34,7 @@ const CONSECUTIVE_HB_FAILURES_FOR_REENROLL: u32 = 3;
 const UPLOAD_RETRY_DELAY_SECS: u64 = 5;
 const IDLE_THRESHOLD_SECS: f64 = 300.0;
 const SCREENSHOT_INTERVAL_SECS: u64 = 300;
+const NETWORK_INTERVAL_SECS: u64 = 60;
 
 // ── CLI / Config ────────────────────────────────────────────────────────────
 
@@ -145,6 +148,7 @@ struct AgentState {
     device_token: String,
     install_token: String,
     events: Vec<AppUsageEventMeta>,
+    network_connections: Vec<NetworkConnection>,
     consecutive_heartbeat_failures: u32,
     active_window: Option<ActiveWindowSession>,
     idle_since: Option<chrono::DateTime<Utc>>,
@@ -676,6 +680,44 @@ async fn upload_loop(
     }
 }
 
+async fn network_upload_loop(
+    client: reqwest::Client,
+    cfg: ResolvedConfig,
+    state: Arc<Mutex<AgentState>>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut tick = interval(Duration::from_secs(120));
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    info!("Network upload loop shutting down");
+                    return;
+                }
+            }
+        }
+
+        let connections: Vec<NetworkConnection> = {
+            let mut s = state.lock().await;
+            std::mem::take(&mut s.network_connections)
+        };
+
+        if connections.is_empty() {
+            continue;
+        }
+
+        let (device_id, install_token) = {
+            let s = state.lock().await;
+            (s.device_id.clone(), s.install_token.clone())
+        };
+
+        if let Err(e) = upload_network_connections(&client, &cfg.server, &state, &device_id, &install_token, connections).await {
+            error!("Network upload cycle failed: {}", e);
+        }
+    }
+}
+
 async fn screenshot_loop(
     _state: Arc<Mutex<AgentState>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
@@ -706,6 +748,49 @@ async fn screenshot_loop(
             Err(e) => {
                 info!("Screenshot skipped: {}", e);
             }
+        }
+    }
+}
+
+async fn network_loop(
+    state: Arc<Mutex<AgentState>>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let collector = agent_collectors::NetworkCollector::new();
+    let mut tick = interval(Duration::from_secs(NETWORK_INTERVAL_SECS));
+
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    info!("Network loop shutting down");
+                    return;
+                }
+            }
+        }
+
+        let mut connections = agent_collectors::get_network_connections();
+
+        collector.resolve_ips(&mut connections).await;
+
+        let resolved_count = connections.iter().filter(|c| c.remote_hostname.is_some()).count();
+        let total_count = connections.len();
+
+        if !connections.is_empty() {
+            info!(total = total_count, resolved = resolved_count, "Network connections collected");
+        }
+
+        {
+            let mut s = state.lock().await;
+            let overflow = s.network_connections.len() + connections.len();
+            if overflow > MAX_EVENT_BUFFER {
+                let to_drop = overflow.saturating_sub(MAX_EVENT_BUFFER);
+                let drop_count = to_drop.min(s.network_connections.len());
+                warn!(to_drop, "Network buffer full, dropping {} oldest connections", drop_count);
+                s.network_connections.drain(..drop_count);
+            }
+            s.network_connections.extend(connections);
         }
     }
 }
@@ -810,6 +895,78 @@ async fn send_bulk_event(
             warn!("Upload network error: {}", e);
             sleep(Duration::from_secs(UPLOAD_RETRY_DELAY_SECS)).await;
             Err(UploadError::Failed(e.to_string()))
+        }
+    }
+}
+
+async fn upload_network_connections(
+    client: &reqwest::Client,
+    server: &str,
+    state: &Arc<Mutex<AgentState>>,
+    device_id: &str,
+    install_token: &str,
+    connections: Vec<NetworkConnection>,
+) -> Result<()> {
+    let mut total = 0u32;
+    let mut resolved = 0u32;
+    let mut tcp_count = 0u32;
+    let mut udp_count = 0u32;
+    let mut domains = HashSet::new();
+
+    for conn in &connections {
+        total += 1;
+        if conn.remote_hostname.is_some() {
+            resolved += 1;
+            if let Some(ref host) = conn.remote_hostname {
+                domains.insert(host.clone());
+            }
+        }
+        match conn.protocol.as_str() {
+            "tcp" => tcp_count += 1,
+            "udp" => udp_count += 1,
+            _ => {}
+        }
+    }
+
+    let summary = NetworkTrafficSummary {
+        device_id: device_id.to_string(),
+        total_connections: total,
+        resolved_connections: resolved,
+        unique_domains: domains.into_iter().collect(),
+        protocol_breakdown: serde_json::json!({
+            "tcp": tcp_count,
+            "udp": udp_count,
+        }),
+    };
+
+    let bulk = BulkNetworkEventRequest {
+        device_id: device_id.to_string(),
+        summary,
+        connections,
+    };
+
+    let resp = client
+        .post(format!("{}/v1/events/network", server))
+        .header("Authorization", format!("Bearer {}", install_token))
+        .json(&bulk)
+        .send()
+        .await;
+
+    match resp {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                info!("Network events uploaded successfully");
+                Ok(())
+            } else {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                warn!(status = status.as_u16(), %body, "Network upload server error");
+                Err(anyhow::anyhow!("Network upload failed with status {}", status))
+            }
+        }
+        Err(e) => {
+            warn!("Network upload network error: {}", e);
+            Err(anyhow::anyhow!("Network upload request failed: {}", e))
         }
     }
 }
@@ -1024,6 +1181,7 @@ async fn run_agent() -> Result<()> {
         device_token: device_token.clone(),
         install_token: install_token.clone(),
         events: Vec::new(),
+        network_connections: Vec::new(),
         consecutive_heartbeat_failures: 0,
         active_window: None,
         idle_since: None,
@@ -1083,6 +1241,20 @@ async fn run_agent() -> Result<()> {
         screenshot_loop(screenshot_state, screenshot_shutdown).await;
     });
 
+    let network_state = Arc::clone(&state);
+    let network_shutdown = shutdown_rx.clone();
+    let network_handle = tokio::spawn(async move {
+        network_loop(network_state, network_shutdown).await;
+    });
+
+    let net_upload_client = client.clone();
+    let net_upload_cfg = cfg.clone();
+    let net_upload_state = Arc::clone(&state);
+    let net_upload_shutdown = shutdown_rx.clone();
+    let net_upload_handle = tokio::spawn(async move {
+        network_upload_loop(net_upload_client, net_upload_cfg, net_upload_state, net_upload_shutdown).await;
+    });
+
     info!("AINMS Agent running. Press Ctrl+C to stop.");
 
     tokio::signal::ctrl_c().await?;
@@ -1109,6 +1281,25 @@ async fn run_agent() -> Result<()> {
         }
     }
 
+    {
+        let connections: Vec<NetworkConnection> = {
+            let mut s = state.lock().await;
+            std::mem::take(&mut s.network_connections)
+        };
+        if !connections.is_empty() {
+            info!(count = connections.len(), "Attempting final upload of pending network connections...");
+            let (device_id, install_token) = {
+                let s = state.lock().await;
+                (s.device_id.clone(), s.install_token.clone())
+            };
+            if let Err(e) =
+                upload_network_connections(&client, &cfg.server, &state, &device_id, &install_token, connections).await
+            {
+                warn!("Final network upload failed: {}", e);
+            }
+        }
+    }
+
     if let Some(sc) = socket_client_ref {
         if let Err(e) = sc.disconnect().await {
             warn!("Socket.IO disconnect error: {}", e);
@@ -1120,6 +1311,8 @@ async fn run_agent() -> Result<()> {
     collect_handle.abort();
     upload_handle.abort();
     screenshot_handle.abort();
+    network_handle.abort();
+    net_upload_handle.abort();
     if let Some(h) = socket_cmd_handle {
         h.abort();
     }
