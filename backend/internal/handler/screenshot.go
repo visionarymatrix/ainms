@@ -2,6 +2,7 @@ package handler
 
 import (
 	"io"
+	"log"
 	"net/http"
 
 	"github.com/ainms/gateway/internal/middleware"
@@ -10,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func RequestScreenshot(svc *service.ScreenshotService) http.HandlerFunc {
+func RequestScreenshot(svc *service.ScreenshotService, hub *service.SocketHub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			DeviceID string `json:"device_id"`
@@ -48,11 +49,21 @@ func RequestScreenshot(svc *service.ScreenshotService) http.HandlerFunc {
 			return
 		}
 
+		if err := hub.SendToAgent(req.DeviceID, "screenshot_request", map[string]interface{}{
+			"request_id":   result.ID.String(),
+			"device_id":    req.DeviceID,
+			"reason":       req.Reason,
+			"policy":       req.Policy,
+			"requested_by": userIDStr,
+		}); err != nil {
+			log.Printf("[ScreenshotHandler] failed to send screenshot_request via Socket.IO to device %s: %v", req.DeviceID, err)
+		}
+
 		writeJSON(w, http.StatusCreated, result)
 	}
 }
 
-func UploadScreenshot(svc *service.ScreenshotService) http.HandlerFunc {
+func UploadScreenshot(svc *service.ScreenshotService, hub *service.SocketHub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(20 << 20); err != nil {
 			writeError(w, http.StatusBadRequest, "failed to parse form: "+err.Error())
@@ -92,6 +103,13 @@ func UploadScreenshot(svc *service.ScreenshotService) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+
+		companyID := svc.GetDeviceCompanyID(r.Context(), deviceID)
+		hub.BroadcastToCompanyAdmins(companyID, "screenshot_ready", map[string]interface{}{
+			"request_id": requestIDStr,
+			"device_id":  deviceIDStr,
+			"status":     "completed",
+		})
 
 		writeJSON(w, http.StatusOK, result)
 	}

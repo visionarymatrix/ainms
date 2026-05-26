@@ -17,14 +17,16 @@ type ScreenshotService struct {
 	screenshotRepo *postgres.ScreenshotRepo
 	commandRepo    *postgres.CommandRepo
 	deviceRepo     *postgres.DeviceRepo
+	employeeRepo   *postgres.EmployeeRepo
 	uploadDir      string
 }
 
-func NewScreenshotService(sr *postgres.ScreenshotRepo, cr *postgres.CommandRepo, dr *postgres.DeviceRepo, uploadDir string) *ScreenshotService {
+func NewScreenshotService(sr *postgres.ScreenshotRepo, cr *postgres.CommandRepo, dr *postgres.DeviceRepo, er *postgres.EmployeeRepo, uploadDir string) *ScreenshotService {
 	return &ScreenshotService{
 		screenshotRepo: sr,
 		commandRepo:    cr,
 		deviceRepo:     dr,
+		employeeRepo:   er,
 		uploadDir:      uploadDir,
 	}
 }
@@ -132,4 +134,16 @@ func (s *ScreenshotService) GetScreenshotImage(ctx context.Context, requestID uu
 
 func (s *ScreenshotService) GetRequestByID(ctx context.Context, id uuid.UUID) (*domain.ScreenshotRequestDB, error) {
 	return s.screenshotRepo.GetByID(ctx, id)
+}
+
+func (s *ScreenshotService) GetDeviceCompanyID(ctx context.Context, deviceID uuid.UUID) string {
+	device, err := s.deviceRepo.GetByID(ctx, deviceID)
+	if err != nil {
+		return ""
+	}
+	employee, err := s.employeeRepo.GetByID(ctx, device.EmployeeID)
+	if err != nil {
+		return ""
+	}
+	return employee.CompanyID.String()
 }

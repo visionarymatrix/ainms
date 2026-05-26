@@ -64,7 +64,7 @@ func main() {
 	enrollmentSvc := service.NewEnrollmentService(employeeRepo, deviceRepo)
 	installTokenSvc := service.NewInstallTokenService(installTokenRepo, employeeRepo)
 	authSvc := service.NewAuthService(userRepo, companyRepo, tenantRepo)
-	screenshotSvc := service.NewScreenshotService(screenshotRepo, commandRepo, deviceRepo, "public/screenshots")
+	screenshotSvc := service.NewScreenshotService(screenshotRepo, commandRepo, deviceRepo, employeeRepo, "public/screenshots")
 
 	socketOpts := socketio.DefaultServerOptions()
 	socketOpts.SetCors(&types.Cors{
@@ -169,8 +169,8 @@ func main() {
 			r.Get("/devices/status", handler.DeviceFleetStatus(enrollmentSvc))
 
 			// Screenshot: admin requests, agent uploads, admin views
-			r.Post("/screenshot/request", handler.RequestScreenshot(screenshotSvc))
-			r.Post("/screenshot/upload", handler.UploadScreenshot(screenshotSvc))
+			r.Post("/screenshot/request", handler.RequestScreenshot(screenshotSvc, socketHub))
+			r.Post("/screenshot/upload", handler.UploadScreenshot(screenshotSvc, socketHub))
 			r.Get("/devices/{deviceID}/screenshots", handler.GetDeviceScreenshots(screenshotSvc))
 			r.Get("/screenshots/{requestID}/image", handler.GetScreenshotImage(screenshotSvc))
 
