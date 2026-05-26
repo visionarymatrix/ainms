@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/ainms/gateway/internal/domain"
@@ -167,7 +168,7 @@ func (s *EnrollmentService) Enroll(ctx context.Context, req domain.EnrollmentReq
 	return response, nil
 }
 
-func (s *EnrollmentService) Heartbeat(ctx context.Context, deviceIDStr string) error {
+func (s *EnrollmentService) Heartbeat(ctx context.Context, deviceIDStr string, agentVersion string) error {
 	deviceID, err := uuid.Parse(deviceIDStr)
 	if err != nil {
 		return fmt.Errorf("invalid device_id: %w", err)
@@ -187,6 +188,12 @@ func (s *EnrollmentService) Heartbeat(ctx context.Context, deviceIDStr string) e
 
 	if err := s.deviceRepo.UpdateHeartbeat(ctx, deviceID); err != nil {
 		return fmt.Errorf("heartbeat failed: %w", err)
+	}
+
+	if agentVersion != "" {
+		if err := s.deviceRepo.UpdateAgentVersion(ctx, deviceID, agentVersion); err != nil {
+			log.Printf("warning: failed to update agent_version for device %s: %v", deviceID, err)
+		}
 	}
 
 	return nil

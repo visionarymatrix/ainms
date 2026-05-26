@@ -110,6 +110,18 @@ func (r *DeviceRepo) UpdateHeartbeat(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+func (r *DeviceRepo) UpdateAgentVersion(ctx context.Context, id uuid.UUID, version string) error {
+	query := `UPDATE devices SET agent_version = $2, updated_at = NOW() WHERE id = $1`
+	res, err := r.pool.Exec(ctx, query, id, version)
+	if err != nil {
+		return fmt.Errorf("update agent_version: %w", err)
+	}
+	if res.RowsAffected() == 0 {
+		return fmt.Errorf("device not found: %s", id)
+	}
+	return nil
+}
+
 func (r *DeviceRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
 	query := `UPDATE devices SET status = $2, updated_at = NOW() WHERE id = $1`
 	res, err := r.pool.Exec(ctx, query, id, status)

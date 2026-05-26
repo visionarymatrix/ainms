@@ -540,6 +540,12 @@ export default function DevicesPage() {
                                   </p>
                                 </div>
                                 <div>
+                                  <span className="text-muted-foreground">Agent Version:</span>
+                                  <p className="font-medium">
+                                    {device.agent_version || "Unknown"}
+                                  </p>
+                                </div>
+                                <div>
                                   <span className="text-muted-foreground">Enrolled:</span>
                                   <p className="font-medium">{timeAgo(device.enrolled_at)}</p>
                                 </div>
@@ -670,6 +676,7 @@ export default function DevicesPage() {
                     <TableHead>Hostname</TableHead>
                     <TableHead>Employee</TableHead>
                     <TableHead>OS</TableHead>
+                    <TableHead>Version</TableHead>
                     <TableHead>Fingerprint</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Connection</TableHead>
@@ -718,6 +725,9 @@ export default function DevicesPage() {
                                 <p>{device.os_version || "Unknown version"}</p>
                               </TooltipContent>
                             </Tooltip>
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {device.agent_version || "—"}
                           </TableCell>
                           <TableCell>
                             <div className="flex items-center gap-1">

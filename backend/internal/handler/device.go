@@ -58,7 +58,14 @@ func DeviceHeartbeat(svc *service.EnrollmentService) http.HandlerFunc {
 			return
 		}
 
-		if err := svc.Heartbeat(r.Context(), deviceIDStr); err != nil {
+		var body struct {
+			AgentVersion string `json:"agent_version"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			body.AgentVersion = ""
+		}
+
+		if err := svc.Heartbeat(r.Context(), deviceIDStr, body.AgentVersion); err != nil {
 			var approvalErr *service.ApprovalError
 			if errors.As(err, &approvalErr) {
 				writeError(w, http.StatusForbidden, approvalErr.Message)

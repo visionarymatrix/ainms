@@ -24,6 +24,7 @@ use agent_comms::socket::{self, SocketCommand};
 
 use config::{default_config_path, load_state, save_state, AgentStateFile, AgentStateSection};
 
+const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_EVENT_BUFFER: usize = 10_000;
 const ENROLL_MAX_RETRIES: u32 = 5;
 const ENROLL_BASE_DELAY_SECS: u64 = 2;
@@ -370,9 +371,11 @@ async fn heartbeat_loop(
         };
 
         let url = format!("{}/v1/devices/{}/heartbeat", cfg.server, device_id);
+        let hb_body = serde_json::json!({ "agent_version": AGENT_VERSION });
         match client
             .put(&url)
             .header("Authorization", format!("Bearer {}", install_token))
+            .json(&hb_body)
             .send()
             .await
         {
