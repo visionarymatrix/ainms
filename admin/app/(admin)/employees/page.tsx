@@ -43,11 +43,11 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Separator } from "@/components/ui/separator";
-import { Plus, Trash2, Copy, Eye, EyeOff, RefreshCw, Monitor, Terminal, Laptop, CloudOff } from "lucide-react";
+import { Plus, Trash2, Copy, Eye, EyeOff, RefreshCw, Monitor, Terminal, Laptop, CloudOff, Camera } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { getUser, getCompanyId } from "@/lib/auth/session";
-import { listEmployees, registerEmployee, deactivateEmployee, getEmployeeDevices, type Employee, type Device } from "@/lib/api/employees";
+import { getUser, getCompanyId, getToken } from "@/lib/auth/session";
+import { listEmployees, registerEmployee, deactivateEmployee, getEmployeeDevices, requestScreenshot, getDeviceScreenshots, type Employee, type Device, type ScreenshotRequest } from "@/lib/api/employees";
 import { getEmployeeInstallToken, type EmployeeInstallToken } from "@/lib/api/install-tokens";
 
 const statusBadge: Record<string, "default" | "destructive" | "outline"> = {
@@ -124,6 +124,10 @@ function EmployeeDetailDialog({ employee, open, onOpenChange, onDeactivate }: Em
   const [tokenLoading, setTokenLoading] = useState(false);
   const [showFullToken, setShowFullToken] = useState(false);
   const [activeTab, setActiveTab] = useState("linux");
+  const [screenshots, setScreenshots] = useState<ScreenshotRequest[]>([]);
+  const [screenshotsLoading, setScreenshotsLoading] = useState(false);
+  const [screenshotRequesting, setScreenshotRequesting] = useState<string | null>(null);
+  const [viewingScreenshot, setViewingScreenshot] = useState<ScreenshotRequest | null>(null);
 
   const fetchDevices = useCallback(async () => {
     if (!employee) return;
@@ -151,6 +155,44 @@ function EmployeeDetailDialog({ employee, open, onOpenChange, onDeactivate }: Em
     }
   }, [employee]);
 
+  const fetchScreenshots = useCallback(async () => {
+    if (!employee) return;
+    const deviceIds = devices.map(d => d.id);
+    if (deviceIds.length === 0) {
+      setScreenshots([]);
+      return;
+    }
+    setScreenshotsLoading(true);
+    try {
+      const allScreenshots: ScreenshotRequest[] = [];
+      await Promise.all(deviceIds.map(async (deviceId) => {
+        const data = await getDeviceScreenshots(deviceId);
+        if (data && data.length > 0) {
+          allScreenshots.push(...data);
+        }
+      }));
+      allScreenshots.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      setScreenshots(allScreenshots.slice(0, 6));
+    } catch {
+      setScreenshots([]);
+    } finally {
+      setScreenshotsLoading(false);
+    }
+  }, [employee, devices]);
+
+  const handleTakeScreenshot = useCallback(async (deviceId: string) => {
+    setScreenshotRequesting(deviceId);
+    try {
+      await requestScreenshot(deviceId);
+      toast.success("Screenshot requested");
+      await fetchScreenshots();
+    } catch {
+      toast.error("Failed to request screenshot");
+    } finally {
+      setScreenshotRequesting(null);
+    }
+  }, [fetchScreenshots]);
+
   useEffect(() => {
     if (open && employee) {
       fetchDevices();
@@ -159,208 +201,349 @@ function EmployeeDetailDialog({ employee, open, onOpenChange, onDeactivate }: Em
   }, [open, employee, fetchDevices, fetchInstallToken]);
 
   useEffect(() => {
+    if (open && employee && devices.length > 0) {
+      fetchScreenshots();
+    }
+  }, [open, employee, devices.length, fetchScreenshots]);
+
+  useEffect(() => {
     if (!open) {
       setShowFullToken(false);
       setActiveTab("linux");
+      setScreenshots([]);
+      setViewingScreenshot(null);
     }
   }, [open]);
+
+  useEffect(() => {
+    if (!open || !employee) return;
+    const hasPending = screenshots.some(ss => ss.status === 'pending');
+    if (!hasPending) return;
+    
+    const interval = setInterval(() => {
+      fetchScreenshots();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [open, employee, screenshots, fetchScreenshots]);
 
   if (!employee) return null;
 
   const linuxCommand = installToken?.install_cmd || "";
   const windowsCommand = installToken?.windows_cmd || "";
 
+  const token = getToken();
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[720px] p-0 gap-0 overflow-hidden flex flex-col max-h-[85vh]">
-        <DialogHeader className="px-6 pt-6 pb-4">
-          <div className="flex items-center gap-4">
-            <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center text-primary font-bold text-lg shrink-0">
-              {employee.first_name[0]}{employee.last_name[0]}
-            </div>
-            <div className="min-w-0">
-              <DialogTitle className="text-xl">{employee.first_name} {employee.last_name}</DialogTitle>
-              <DialogDescription className="flex items-center gap-2 mt-1">
-                <code className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono">{employee.employee_id}</code>
-                <Badge variant={statusBadge[employee.status] || "outline"} className="text-xs">{employee.status}</Badge>
-                {employee.email && <span className="text-xs">{employee.email}</span>}
-              </DialogDescription>
-            </div>
-          </div>
-        </DialogHeader>
-
-        <Separator />
-
-        <div className="flex-1 overflow-y-auto">
-          <div className="px-6 py-4 space-y-6">
-
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold flex items-center gap-2">
-                  <Laptop className="h-4 w-4 text-muted-foreground shrink-0" />
-                  Devices
-                  {devices.length > 0 && (
-                    <Badge variant="secondary" className="text-xs">{devices.length}</Badge>
-                  )}
-                </h3>
-                <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={fetchDevices} disabled={devicesLoading}>
-                  <RefreshCw className={`h-3 w-3 mr-1 ${devicesLoading ? "animate-spin" : ""}`} />
-                  Refresh
-                </Button>
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="sm:max-w-[720px] p-0 gap-0 overflow-hidden flex flex-col max-h-[85vh]">
+          <DialogHeader className="px-6 pt-6 pb-4">
+            <div className="flex items-center gap-4">
+              <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center text-primary font-bold text-lg shrink-0">
+                {employee.first_name[0]}{employee.last_name[0]}
               </div>
-
-              {devicesLoading ? (
-                <div className="space-y-2">
-                  {[1, 2].map((i) => (
-                    <Skeleton key={i} className="h-12 w-full rounded-lg" />
-                  ))}
-                </div>
-              ) : devices.length === 0 ? (
-                <div className="flex items-center gap-3 py-4 text-muted-foreground">
-                  <CloudOff className="h-5 w-5 shrink-0" />
-                  <div>
-                    <p className="text-sm">No devices connected</p>
-                    <p className="text-xs">Share the install command below to enroll a device</p>
-                  </div>
-                </div>
-              ) : (
-                <div className="grid gap-2">
-                  {devices.map((device) => {
-                    const isOnline = device.connection_status === "online";
-                    const isIdle = device.connection_status === "idle";
-                    return (
-                      <div key={device.id} className="flex items-center gap-3 rounded-lg border bg-card px-3 py-2.5">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <div className="relative flex h-2.5 w-2.5 shrink-0">
-                              {(isOnline || isIdle) && (
-                                <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-40 ${isOnline ? "bg-emerald-500" : "bg-amber-500"}`} />
-                              )}
-                              <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${isOnline ? "bg-emerald-500" : isIdle ? "bg-amber-500" : "bg-gray-400"}`} />
-                            </div>
-                          </TooltipTrigger>
-                          <TooltipContent>{isOnline ? "Online" : isIdle ? "Idle" : "Offline"}</TooltipContent>
-                        </Tooltip>
-                        <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-medium truncate">{device.hostname || "Unnamed Device"}</p>
-                          <p className="text-xs text-muted-foreground truncate">
-                            {device.os_type === "linux" ? "Linux" : device.os_type === "macos" ? "macOS" : device.os_type === "windows" ? "Windows" : device.os_type}
-                            {device.os_version ? ` ${device.os_version}` : ""}
-                          </p>
-                        </div>
-                        <div className="text-xs text-muted-foreground shrink-0">
-                          {timeAgo(device.last_heartbeat)}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+              <div className="min-w-0">
+                <DialogTitle className="text-xl">{employee.first_name} {employee.last_name}</DialogTitle>
+                <DialogDescription className="flex items-center gap-2 mt-1">
+                  <code className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono">{employee.employee_id}</code>
+                  <Badge variant={statusBadge[employee.status] || "outline"} className="text-xs">{employee.status}</Badge>
+                  {employee.email && <span className="text-xs">{employee.email}</span>}
+                </DialogDescription>
+              </div>
             </div>
+          </DialogHeader>
 
-            <Separator />
+          <Separator />
 
+          <div className="flex-1 overflow-y-auto">
+            <div className="px-6 py-4 space-y-6">
 
-            <div>
-              <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
-                <Terminal className="h-4 w-4 text-muted-foreground shrink-0" />
-                Install Command
-              </h3>
-
-              {tokenLoading ? (
-                <div className="space-y-2">
-                  <Skeleton className="h-10 w-3/4 rounded-lg" />
-                  <Skeleton className="h-28 w-full rounded-lg" />
-                </div>
-              ) : installToken ? (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2 text-sm bg-muted/50 border rounded-lg px-3 py-2">
-                    <span className="text-muted-foreground shrink-0">Token</span>
-                    <code className="font-mono text-xs flex-1 truncate select-all">
-                      {showFullToken ? installToken.token : maskToken(installToken.token)}
-                    </code>
-                    <div className="flex items-center gap-1 shrink-0">
-                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setShowFullToken(!showFullToken)}>
-                        {showFullToken ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                      </Button>
-                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => copyToClipboard(installToken.token, "Token")}>
-                        <Copy className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  </div>
-
-                  <Tabs value={activeTab} onValueChange={setActiveTab}>
-                    <TabsList className="h-8 w-full grid grid-cols-2">
-                      <TabsTrigger value="linux" className="text-xs">Linux / macOS</TabsTrigger>
-                      <TabsTrigger value="windows" className="text-xs">Windows</TabsTrigger>
-                    </TabsList>
-                    <TabsContent value="linux" className="mt-2">
-                      <div className="relative group">
-                        <pre className="bg-zinc-950 text-zinc-100 p-4 rounded-lg text-xs font-mono leading-relaxed overflow-x-auto pr-24">
-                          <code>{linuxCommand}</code>
-                        </pre>
-                        <Button
-                          size="sm"
-                          className="absolute top-2 right-2 h-7 text-xs gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity"
-                          onClick={() => copyToClipboard(linuxCommand, "Linux install command")}
-                        >
-                          <Copy className="h-3 w-3" />
-                          Copy
-                        </Button>
-                      </div>
-                    </TabsContent>
-                    <TabsContent value="windows" className="mt-2">
-                      <div className="relative group">
-                        <pre className="bg-zinc-950 text-zinc-100 p-4 rounded-lg text-xs font-mono leading-relaxed overflow-x-auto pr-24">
-                          <code>{windowsCommand}</code>
-                        </pre>
-                        <Button
-                          size="sm"
-                          className="absolute top-2 right-2 h-7 text-xs gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity"
-                          onClick={() => copyToClipboard(windowsCommand, "Windows install command")}
-                        >
-                          <Copy className="h-3 w-3" />
-                          Copy
-                        </Button>
-                      </div>
-                    </TabsContent>
-                  </Tabs>
-
-                  <p className="text-xs text-muted-foreground">
-                    {installToken.expires_at
-                      ? `Token expires ${formatDate(installToken.expires_at)}`
-                      : "This token never expires"
-                    }
-                  </p>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center gap-3 py-6 border border-dashed rounded-lg bg-muted/30">
-                  <p className="text-sm text-muted-foreground">No install token yet</p>
-                  <Button size="sm" onClick={fetchInstallToken} disabled={tokenLoading}>
-                    {tokenLoading ? "Generating..." : "Generate Install Token"}
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold flex items-center gap-2">
+                    <Laptop className="h-4 w-4 text-muted-foreground shrink-0" />
+                    Devices
+                    {devices.length > 0 && (
+                      <Badge variant="secondary" className="text-xs">{devices.length}</Badge>
+                    )}
+                  </h3>
+                  <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={fetchDevices} disabled={devicesLoading}>
+                    <RefreshCw className={`h-3 w-3 mr-1 ${devicesLoading ? "animate-spin" : ""}`} />
+                    Refresh
                   </Button>
                 </div>
-              )}
+
+                {devicesLoading ? (
+                  <div className="space-y-2">
+                    {[1, 2].map((i) => (
+                      <Skeleton key={i} className="h-12 w-full rounded-lg" />
+                    ))}
+                  </div>
+                ) : devices.length === 0 ? (
+                  <div className="flex items-center gap-3 py-4 text-muted-foreground">
+                    <CloudOff className="h-5 w-5 shrink-0" />
+                    <div>
+                      <p className="text-sm">No devices connected</p>
+                      <p className="text-xs">Share the install command below to enroll a device</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid gap-2">
+                    {devices.map((device) => {
+                      const isOnline = device.connection_status === "online";
+                      const isIdle = device.connection_status === "idle";
+                      return (
+                        <div key={device.id} className="flex items-center gap-3 rounded-lg border bg-card px-3 py-2.5">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <div className="relative flex h-2.5 w-2.5 shrink-0">
+                                {(isOnline || isIdle) && (
+                                  <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-40 ${isOnline ? "bg-emerald-500" : "bg-amber-500"}`} />
+                                )}
+                                <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${isOnline ? "bg-emerald-500" : isIdle ? "bg-amber-500" : "bg-gray-400"}`} />
+                              </div>
+                            </TooltipTrigger>
+                            <TooltipContent>{isOnline ? "Online" : isIdle ? "Idle" : "Offline"}</TooltipContent>
+                          </Tooltip>
+                          <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-medium truncate">{device.hostname || "Unnamed Device"}</p>
+                            <p className="text-xs text-muted-foreground truncate">
+                              {device.os_type === "linux" ? "Linux" : device.os_type === "macos" ? "macOS" : device.os_type === "windows" ? "Windows" : device.os_type}
+                              {device.os_version ? ` ${device.os_version}` : ""}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="text-xs text-muted-foreground shrink-0">
+                              {timeAgo(device.last_heartbeat)}
+                            </div>
+                            {(isOnline || isIdle) && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-7 w-7"
+                                    disabled={screenshotRequesting === device.id}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleTakeScreenshot(device.id);
+                                    }}
+                                  >
+                                    {screenshotRequesting === device.id ? (
+                                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                      <Camera className="h-3.5 w-3.5" />
+                                    )}
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Take Screenshot</TooltipContent>
+                              </Tooltip>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <Separator />
+
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold flex items-center gap-2">
+                    <Camera className="h-4 w-4 text-muted-foreground shrink-0" />
+                    Screenshots
+                    {screenshots.length > 0 && (
+                      <Badge variant="secondary" className="text-xs">{screenshots.length}</Badge>
+                    )}
+                  </h3>
+                  <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={fetchScreenshots} disabled={screenshotsLoading}>
+                    <RefreshCw className={`h-3 w-3 mr-1 ${screenshotsLoading ? "animate-spin" : ""}`} />
+                    Refresh
+                  </Button>
+                </div>
+
+                {screenshotsLoading && screenshots.length === 0 ? (
+                  <div className="space-y-2">
+                    <Skeleton className="h-20 w-full" />
+                    <Skeleton className="h-20 w-full" />
+                  </div>
+                ) : screenshots.length === 0 ? (
+                  <div className="flex items-center gap-3 py-4 text-muted-foreground">
+                    <Camera className="h-5 w-5 shrink-0" />
+                    <p className="text-sm">No screenshots yet. Take one from a device above.</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-2">
+                    {screenshots.map((ss) => (
+                      <div key={ss.id} className="relative group rounded-lg border overflow-hidden bg-muted/30">
+                        {ss.status === 'pending' ? (
+                          <div className="flex items-center justify-center h-28">
+                            <div className="flex flex-col items-center gap-1">
+                              <RefreshCw className="h-5 w-5 animate-spin text-muted-foreground" />
+                              <span className="text-xs text-muted-foreground">Capturing...</span>
+                            </div>
+                          </div>
+                        ) : ss.status === 'completed' && ss.image_path ? (
+                          <img
+                            src={`/api/screenshots/${ss.id}?token=${token}`}
+                            alt={`Screenshot ${ss.id}`}
+                            className="w-full h-28 object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                            onClick={() => setViewingScreenshot(ss)}
+                          />
+                        ) : (
+                          <div className="flex items-center justify-center h-28 text-muted-foreground text-xs">
+                            {ss.status}
+                          </div>
+                        )}
+                        <div className="absolute bottom-0 inset-x-0 bg-black/60 px-2 py-1 flex items-center justify-between">
+                          <p className="text-white text-[10px] truncate">
+                            {new Date(ss.created_at).toLocaleString()}
+                          </p>
+                          {ss.status === 'completed' && (
+                            <span className="text-emerald-400 text-[10px]">&#x2713;</span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <Separator />
+
+              <div>
+                <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
+                  <Terminal className="h-4 w-4 text-muted-foreground shrink-0" />
+                  Install Command
+                </h3>
+
+                {tokenLoading ? (
+                  <div className="space-y-2">
+                    <Skeleton className="h-10 w-3/4 rounded-lg" />
+                    <Skeleton className="h-28 w-full rounded-lg" />
+                  </div>
+                ) : installToken ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2 text-sm bg-muted/50 border rounded-lg px-3 py-2">
+                      <span className="text-muted-foreground shrink-0">Token</span>
+                      <code className="font-mono text-xs flex-1 truncate select-all">
+                        {showFullToken ? installToken.token : maskToken(installToken.token)}
+                      </code>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setShowFullToken(!showFullToken)}>
+                          {showFullToken ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                        </Button>
+                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => copyToClipboard(installToken.token, "Token")}>
+                          <Copy className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+
+                    <Tabs value={activeTab} onValueChange={setActiveTab}>
+                      <TabsList className="h-8 w-full grid grid-cols-2">
+                        <TabsTrigger value="linux" className="text-xs">Linux / macOS</TabsTrigger>
+                        <TabsTrigger value="windows" className="text-xs">Windows</TabsTrigger>
+                      </TabsList>
+                      <TabsContent value="linux" className="mt-2">
+                        <div className="relative group">
+                          <pre className="bg-zinc-950 text-zinc-100 p-4 rounded-lg text-xs font-mono leading-relaxed overflow-x-auto pr-24">
+                            <code>{linuxCommand}</code>
+                          </pre>
+                          <Button
+                            size="sm"
+                            className="absolute top-2 right-2 h-7 text-xs gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity"
+                            onClick={() => copyToClipboard(linuxCommand, "Linux install command")}
+                          >
+                            <Copy className="h-3 w-3" />
+                            Copy
+                          </Button>
+                        </div>
+                      </TabsContent>
+                      <TabsContent value="windows" className="mt-2">
+                        <div className="relative group">
+                          <pre className="bg-zinc-950 text-zinc-100 p-4 rounded-lg text-xs font-mono leading-relaxed overflow-x-auto pr-24">
+                            <code>{windowsCommand}</code>
+                          </pre>
+                          <Button
+                            size="sm"
+                            className="absolute top-2 right-2 h-7 text-xs gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity"
+                            onClick={() => copyToClipboard(windowsCommand, "Windows install command")}
+                          >
+                            <Copy className="h-3 w-3" />
+                            Copy
+                          </Button>
+                        </div>
+                      </TabsContent>
+                    </Tabs>
+
+                    <p className="text-xs text-muted-foreground">
+                      {installToken.expires_at
+                        ? `Token expires ${formatDate(installToken.expires_at)}`
+                        : "This token never expires"
+                      }
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center gap-3 py-6 border border-dashed rounded-lg bg-muted/30">
+                    <p className="text-sm text-muted-foreground">No install token yet</p>
+                    <Button size="sm" onClick={fetchInstallToken} disabled={tokenLoading}>
+                      {tokenLoading ? "Generating..." : "Generate Install Token"}
+                    </Button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-        </div>
 
-        <Separator />
+          <Separator />
 
-        <DialogFooter className="px-6 py-3 shrink-0">
-          {employee.status === "active" && onDeactivate && (
-            <Button variant="destructive" size="sm" onClick={onDeactivate} className="mr-auto">
-              <Trash2 className="mr-1.5 h-3.5 w-3.5" />
-              Deactivate
+          <DialogFooter className="px-6 py-3 shrink-0">
+            {employee.status === "active" && onDeactivate && (
+              <Button variant="destructive" size="sm" onClick={onDeactivate} className="mr-auto">
+                <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                Deactivate
+              </Button>
+            )}
+            <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>
+              Close
             </Button>
-          )}
-          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>
-            Close
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!viewingScreenshot} onOpenChange={(open) => !open && setViewingScreenshot(null)}>
+        <DialogContent className="max-w-4xl p-0 gap-0 overflow-hidden">
+          <DialogHeader className="px-6 pt-6 pb-2">
+            <DialogTitle className="flex items-center gap-2">
+              Screenshot
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => viewingScreenshot && copyToClipboard(`${window.location.origin}/api/screenshots/${viewingScreenshot.id}?token=${token}`, "Image URL")}
+              >
+                <Copy className="h-4 w-4" />
+              </Button>
+            </DialogTitle>
+            <DialogDescription>
+              {viewingScreenshot && `Taken ${new Date(viewingScreenshot.created_at).toLocaleString()}`}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="px-6 pb-6">
+            {viewingScreenshot && (
+              <img
+                src={`/api/screenshots/${viewingScreenshot.id}?token=${token}`}
+                alt="Full screenshot"
+                className="w-full rounded-lg border"
+              />
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 

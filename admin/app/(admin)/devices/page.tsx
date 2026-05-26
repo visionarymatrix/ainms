@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api/client";
 import { getUser } from "@/lib/auth/session";
+import { requestScreenshot, getDeviceScreenshots, type ScreenshotRequest } from "@/lib/api/employees";
 import {
   CheckCircle,
   XCircle,
@@ -47,6 +48,10 @@ import {
   Network,
   Wifi,
   AlertCircle,
+  Camera,
+  RefreshCw,
+  X,
+  Eye,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -136,6 +141,10 @@ export default function DevicesPage() {
   const [error, setError] = useState<string | null>(null);
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
+  const [screenshotLoading, setScreenshotLoading] = useState<Record<string, boolean>>({});
+  const [pendingScreenshots, setPendingScreenshots] = useState<Record<string, string>>({});
+  const [completedScreenshots, setCompletedScreenshots] = useState<Record<string, ScreenshotRequest>>({});
+  const [viewingScreenshot, setViewingScreenshot] = useState<ScreenshotRequest | null>(null);
   const [rejectDialogOpen, setRejectDialogOpen] = useState(false);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const user = getUser();
@@ -230,6 +239,60 @@ export default function DevicesPage() {
   function openRejectDialog(deviceId: string) {
     setSelectedDeviceId(deviceId);
     setRejectDialogOpen(true);
+  }
+
+  async function handleTakeScreenshot(deviceId: string) {
+    setScreenshotLoading((prev) => ({ ...prev, [deviceId]: true }));
+    setPendingScreenshots((prev) => ({ ...prev, [deviceId]: "requested" }));
+    try {
+      const req = await requestScreenshot(deviceId);
+      const requestId = req.id;
+      setPendingScreenshots((prev) => ({ ...prev, [deviceId]: "capturing" }));
+      toast.info("Screenshot requested — waiting for agent to capture...");
+
+      // Poll until completed (max 60s, check every 3s)
+      const maxAttempts = 20;
+      let found = false;
+      for (let i = 0; i < maxAttempts; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        try {
+          const screenshots = await getDeviceScreenshots(deviceId);
+          const completed = screenshots.find((s) => s.id === requestId && s.status === "completed" && s.image_path);
+          if (completed) {
+            setCompletedScreenshots((prev) => ({ ...prev, [deviceId]: completed }));
+            setPendingScreenshots((prev) => {
+              const next = { ...prev };
+              delete next[deviceId];
+              return next;
+            });
+            toast.success("Screenshot captured and uploaded!");
+            found = true;
+            break;
+          }
+        } catch {
+          // Network error during polling, keep trying
+        }
+      }
+
+      if (!found) {
+        setPendingScreenshots((prev) => ({ ...prev, [deviceId]: "timeout" }));
+        toast.warning("Screenshot request sent, but agent hasn't responded yet. Check back later.");
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to request screenshot");
+      setPendingScreenshots((prev) => {
+        const next = { ...prev };
+        delete next[deviceId];
+        return next;
+      });
+    } finally {
+      setScreenshotLoading((prev) => ({ ...prev, [deviceId]: false }));
+    }
+  }
+
+  function getScreenshotImageUrl(requestId: string): string {
+    const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : "";
+    return `/api/screenshots/${requestId}?token=${encodeURIComponent(token)}`;
   }
 
   function toggleRow(deviceId: string) {
@@ -535,6 +598,7 @@ export default function DevicesPage() {
                     <TableHead>Connection</TableHead>
                     <TableHead>Last Seen</TableHead>
                     <TableHead>Enrolled</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -619,10 +683,33 @@ export default function DevicesPage() {
                           </TableCell>
                           <TableCell>{timeAgo(device.last_heartbeat)}</TableCell>
                           <TableCell>{timeAgo(device.enrolled_at)}</TableCell>
+                          <TableCell className="text-right">
+                            {device.connection_status === "online" || device.connection_status === "idle" ? (
+                              <div className="flex items-center justify-end gap-1">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 text-xs gap-1"
+                                  disabled={screenshotLoading[device.id]}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleTakeScreenshot(device.id);
+                                  }}
+                                >
+                                  {screenshotLoading[device.id] ? (
+                                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                                  ) : (
+                                    <Camera className="h-3.5 w-3.5" />
+                                  )}
+                                  {pendingScreenshots[device.id] === "capturing" ? "Capturing..." : "Screenshot"}
+                                </Button>
+                              </div>
+                            ) : null}
+                          </TableCell>
                         </TableRow>
                         {isExpanded && (
                           <TableRow className="bg-muted/30">
-                            <TableCell colSpan={9} className="p-4">
+                            <TableCell colSpan={10} className="p-4">
                               <div className="space-y-4">
                                 <h4 className="font-semibold text-sm">System Information</h4>
                                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 text-sm">
@@ -717,6 +804,55 @@ export default function DevicesPage() {
                                     </div>
                                   )}
                                 </div>
+
+                                {/* Screenshot result section */}
+                                {(completedScreenshots[device.id] || pendingScreenshots[device.id]) && (
+                                  <div className="mt-4 pt-4 border-t">
+                                    <h4 className="font-semibold text-sm flex items-center gap-2 mb-2">
+                                      <Camera className="h-4 w-4 text-muted-foreground" />
+                                      Screenshot
+                                    </h4>
+                                    {completedScreenshots[device.id] ? (
+                                      <div className="relative group rounded-lg overflow-hidden border bg-card w-fit">
+                                        <img
+                                          src={getScreenshotImageUrl(completedScreenshots[device.id].id)}
+                                          alt="Device screenshot"
+                                          className="max-h-48 object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                                          onClick={() => setViewingScreenshot(completedScreenshots[device.id])}
+                                        />
+                                        <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                          <Button
+                                            variant="secondary"
+                                            size="icon"
+                                            className="h-7 w-7"
+                                            onClick={() => setViewingScreenshot(completedScreenshots[device.id])}
+                                          >
+                                            <Eye className="h-3.5 w-3.5" />
+                                          </Button>
+                                        </div>
+                                        <div className="absolute bottom-0 inset-x-0 bg-black/60 px-2 py-1">
+                                          <p className="text-white text-[10px]">
+                                            {new Date(completedScreenshots[device.id].created_at).toLocaleString()}
+                                          </p>
+                                        </div>
+                                      </div>
+                                    ) : pendingScreenshots[device.id] === "timeout" ? (
+                                      <div className="flex items-center gap-2 text-muted-foreground text-sm py-2">
+                                        <AlertCircle className="h-4 w-4" />
+                                        <span>Agent did not respond. Try again later.</span>
+                                      </div>
+                                    ) : (
+                                      <div className="flex items-center gap-2 text-muted-foreground text-sm py-2">
+                                        <RefreshCw className="h-4 w-4 animate-spin" />
+                                        <span>
+                                          {pendingScreenshots[device.id] === "capturing"
+                                            ? "Agent is capturing screenshot..."
+                                            : "Requesting screenshot..."}
+                                        </span>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             </TableCell>
                           </TableRow>
@@ -750,6 +886,26 @@ export default function DevicesPage() {
                 {selectedDeviceId && actionLoading[selectedDeviceId] ? "Rejecting..." : "Reject"}
               </Button>
             </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={!!viewingScreenshot} onOpenChange={(open) => { if (!open) setViewingScreenshot(null); }}>
+          <DialogContent className="max-w-4xl p-0 gap-0 overflow-hidden">
+            <DialogHeader className="px-6 pt-6 pb-2">
+              <DialogTitle>Screenshot</DialogTitle>
+              <DialogDescription>
+                {viewingScreenshot ? new Date(viewingScreenshot.created_at).toLocaleString() : ""}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="px-6 pb-6">
+              {viewingScreenshot && (
+                <img
+                  src={getScreenshotImageUrl(viewingScreenshot.id)}
+                  alt="Device screenshot"
+                  className="w-full rounded-lg"
+                />
+              )}
+            </div>
           </DialogContent>
         </Dialog>
       </div>
