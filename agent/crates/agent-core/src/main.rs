@@ -18,7 +18,7 @@ use tracing_subscriber::EnvFilter;
 
 use agent_proto::events::{
     AppUsageEventMeta, AppUsageSummary, BulkEventRequest, EnrollmentResponse,
-    TokenEnrollRequest,
+    PendingCommand, TokenEnrollRequest,
 };
 
 use config::{default_config_path, load_state, save_state, AgentStateFile, AgentStateSection};
@@ -379,6 +379,27 @@ async fn heartbeat_loop(
                 info!(device_id, "Heartbeat OK");
                 let mut s = state.lock().await;
                 s.consecutive_heartbeat_failures = 0;
+                drop(s);
+
+                if let Ok(commands) = poll_commands(&client, &cfg.server, &device_id, &install_token).await {
+                    for cmd in &commands {
+                        if cmd.command_type == "screenshot_request" {
+                            info!(command_id = %cmd.id, "Received screenshot request command");
+                            let cmd_client = client.clone();
+                            let cmd_server = cfg.server.clone();
+                            let cmd_device_id = device_id.clone();
+                            let cmd_install_token = install_token.clone();
+                            let cmd_clone = cmd.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_screenshot_request(
+                                    &cmd_client, &cmd_server, &cmd_device_id, &cmd_install_token, &cmd_clone,
+                                ).await {
+                                    error!("Failed to handle screenshot request: {}", e);
+                                }
+                            });
+                        }
+                    }
+                }
             }
             Ok(resp) if resp.status().as_u16() == 403 => {
                 warn!("Heartbeat got 403 (device not approved), will re-enroll");
@@ -808,6 +829,97 @@ async fn send_bulk_event(
             Err(UploadError::Failed(e.to_string()))
         }
     }
+}
+
+async fn poll_commands(
+    client: &reqwest::Client,
+    server: &str,
+    device_id: &str,
+    install_token: &str,
+) -> Result<Vec<PendingCommand>> {
+    let url = format!("{}/v1/devices/{}/commands", server, device_id);
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", install_token))
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        let commands: Vec<PendingCommand> = resp.json().await?;
+        Ok(commands)
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        warn!(status = status.as_u16(), "Command poll failed: {}", body);
+        Ok(Vec::new())
+    }
+}
+
+async fn handle_screenshot_request(
+    client: &reqwest::Client,
+    server: &str,
+    device_id: &str,
+    install_token: &str,
+    cmd: &PendingCommand,
+) -> Result<()> {
+    let request_id = cmd.payload.get("request_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    info!(request_id, "Capturing screenshot on demand");
+
+    let commander = agent_screenshot::ScreenshotCommander::new();
+    let image_data = match commander.capture().await {
+        Ok(data) => data,
+        Err(e) => {
+            error!("Screenshot capture failed: {}", e);
+            return Err(e);
+        }
+    };
+
+    info!(size = image_data.len(), "Screenshot captured, uploading");
+
+    let url = format!("{}/v1/screenshot/upload", server);
+    let file_part = reqwest::multipart::Part::bytes(image_data)
+        .file_name("screenshot.png")
+        .mime_str("image/png")
+        .map_err(|e| anyhow::anyhow!("mime error: {}", e))?;
+
+    let form = reqwest::multipart::Form::new()
+        .text("request_id", request_id.to_string())
+        .text("device_id", device_id.to_string())
+        .part("image", file_part);
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", install_token))
+        .multipart(form)
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        info!(request_id, "Screenshot uploaded successfully");
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        warn!(status = status.as_u16(), "Screenshot upload failed: {}", body);
+    }
+
+    let ack_url = format!("{}/v1/commands/ack", server);
+    let ack_resp = client
+        .post(&ack_url)
+        .header("Authorization", format!("Bearer {}", install_token))
+        .json(&serde_json::json!({"command_id": cmd.id}))
+        .send()
+        .await?;
+
+    if ack_resp.status().is_success() {
+        info!(command_id = %cmd.id, "Command acknowledged");
+    } else {
+        warn!("Failed to acknowledge command");
+    }
+
+    Ok(())
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────

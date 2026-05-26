@@ -182,3 +182,13 @@ pub struct AppSession {
     pub duration_sec: f64,
     pub idle_during: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingCommand {
+    pub id: String,
+    pub device_id: String,
+    pub command_type: String,
+    pub payload: serde_json::Value,
+    pub status: String,
+    pub created_at: String,
+}
