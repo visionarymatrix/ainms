@@ -42,9 +42,11 @@ func main() {
 
 	chConn, err := clickhouse.NewConn(ctx, cfg.ClickHouse.DSN())
 	if err != nil {
-		log.Fatalf("failed to connect to ClickHouse: %v", err)
+		log.Printf("WARNING: ClickHouse unavailable (analytics endpoints disabled): %v", err)
+		chConn = nil
+	} else {
+		defer chConn.Close()
 	}
-	defer chConn.Close()
 
 	rdb := redisstore.NewClient(cfg.Redis.Addr(), cfg.Redis.Password, cfg.Redis.DB)
 	defer rdb.Close()
@@ -57,18 +59,23 @@ func main() {
 	installTokenRepo := postgres.NewInstallTokenRepo(pgPool)
 	screenshotRepo := postgres.NewScreenshotRepo(pgPool)
 	commandRepo := postgres.NewCommandRepo(pgPool)
+	roleRepo := postgres.NewRoleRepo(pgPool)
+	appClassificationRepo := postgres.NewAppClassificationRepo(pgPool)
+	alertRuleRepo := postgres.NewAlertRuleRepo(pgPool)
+	policyRepo := postgres.NewPolicyRepo(pgPool)
 	eventRepo := clickhouse.NewEventRepo(pgPool)
 
 	companySvc := service.NewCompanyService(companyRepo)
 	employeeSvc := service.NewEmployeeService(employeeRepo)
-	enrollmentSvc := service.NewEnrollmentService(employeeRepo, deviceRepo)
+	enrollmentSvc := service.NewEnrollmentService(employeeRepo, deviceRepo, roleRepo, appClassificationRepo, alertRuleRepo, policyRepo)
 	installTokenSvc := service.NewInstallTokenService(installTokenRepo, employeeRepo)
 	authSvc := service.NewAuthService(userRepo, companyRepo, tenantRepo)
 	screenshotSvc := service.NewScreenshotService(screenshotRepo, commandRepo, deviceRepo, employeeRepo, "public/screenshots")
+	roleSvc := service.NewRoleService(roleRepo)
 
 	socketOpts := socketio.DefaultServerOptions()
 	socketOpts.SetCors(&types.Cors{
-		Origin:      []string{"http://173.249.47.143:3440", "http://localhost:3440"},
+		Origin:      []string{"http://localhost:3440", "http://localhost:3440"},
 		Methods:     []string{"GET", "POST"},
 		Credentials: true,
 	})
@@ -99,7 +106,7 @@ func main() {
 	r.Use(chimw.Timeout(60 * time.Second))
 
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://173.249.47.143:3440", "http://localhost:3440", "http://localhost:3000"},
+		AllowedOrigins:   []string{"http://localhost:3440", "http://localhost:3440", "http://localhost:3000"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
 		ExposedHeaders:   []string{"Content-Length"},
@@ -144,6 +151,7 @@ func main() {
 			r.Get("/companies/{companyID}/employees", handler.ListEmployees(employeeSvc))
 			r.Patch("/employees/{employeeID}", handler.UpdateEmployee(employeeSvc))
 			r.Delete("/employees/{employeeID}", handler.DeactivateEmployee(employeeSvc))
+			r.Post("/employees/{employeeID}/query", handler.PostNLQuery(employeeRepo, deviceRepo, socketHub))
 
 			r.Post("/enroll", handler.EnrollDevice(enrollmentSvc))
 			r.Put("/devices/{deviceID}/heartbeat", handler.DeviceHeartbeat(enrollmentSvc))
@@ -156,12 +164,14 @@ func main() {
 			r.Post("/devices/{deviceID}/reject", handler.RejectDevice(enrollmentSvc))
 			r.Get("/devices/pending", handler.ListPendingDevices(enrollmentSvc))
 
-			r.Get("/rules/sync", handler.SyncRules(nil))
+			r.Get("/rules/sync", handler.SyncRules(appClassificationRepo, alertRuleRepo, policyRepo, deviceRepo, employeeRepo, companyRepo))
 			r.Get("/models/latest", handler.GetLatestModel(nil))
 
 			r.Post("/events/bulk", handler.BulkEvents(eventRepo))
 			r.Post("/events/priority", handler.PriorityEvent(eventRepo))
 			r.Post("/events/popup", handler.PopupEvent(eventRepo))
+			r.Post("/events/browser-tabs", handler.BrowserTabsEvent(eventRepo))
+			r.Post("/events/network", handler.NetworkTrafficEvent(eventRepo))
 
 			r.Get("/devices/{deviceID}/usage-summaries", handler.GetDeviceUsageSummaries(eventRepo))
 			r.Get("/devices/{deviceID}/events", handler.GetDeviceEvents(eventRepo))
@@ -177,6 +187,23 @@ func main() {
 			// Agent commands: agent polls for pending commands
 			r.Get("/devices/{deviceID}/commands", handler.GetPendingCommands(screenshotSvc))
 			r.Post("/commands/ack", handler.AcknowledgeCommand(screenshotSvc))
+
+			// Role CRUD
+			r.Post("/companies/{companyID}/roles", handler.CreateRole(roleSvc))
+			r.Get("/companies/{companyID}/roles", handler.ListRoles(roleSvc))
+			r.Get("/roles/{roleID}", handler.GetRole(roleSvc))
+			r.Put("/roles/{roleID}", handler.UpdateRole(roleSvc))
+			r.Delete("/roles/{roleID}", handler.DeleteRole(roleSvc))
+
+			// AppClassification CRUD (role-scoped)
+			r.Get("/roles/{roleID}/app-classifications", handler.ListAppClassifications(appClassificationRepo))
+			r.Post("/roles/{roleID}/app-classifications", handler.CreateAppClassification(appClassificationRepo))
+			r.Delete("/roles/{roleID}/app-classifications/{classificationID}", handler.DeleteAppClassification(appClassificationRepo))
+
+			// AlertRule CRUD (role-scoped)
+			r.Get("/roles/{roleID}/alert-rules", handler.ListAlertRules(alertRuleRepo))
+			r.Post("/roles/{roleID}/alert-rules", handler.CreateAlertRule(alertRuleRepo))
+			r.Delete("/roles/{roleID}/alert-rules/{ruleID}", handler.DeleteAlertRule(alertRuleRepo))
 		})
 	})
 

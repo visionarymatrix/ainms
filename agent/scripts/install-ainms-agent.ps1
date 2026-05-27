@@ -23,7 +23,7 @@
     Company ID (UUID format) for the config file
 
 .PARAMETER Server
-    AINMS server URL. Default: http://173.249.47.143:8440
+    AINMS server URL. Default: http://localhost:8440
 
 .PARAMETER AuthEmail
     Authentication email. Default: superadmin@ainms.io
@@ -68,7 +68,7 @@ $ExeName         = "agent-core.exe"
 $FirewallRule    = "AINMS Agent - Outbound"
 
 # Default server/auth values
-$DefaultServer       = "http://173.249.47.143:8440"
+$DefaultServer       = "http://localhost:8440"
 $DefaultAuthEmail    = "superadmin@ainms.io"
 $DefaultAuthPassword = "changeme"
 

@@ -21,15 +21,71 @@ func (e *ApprovalError) Error() string {
 }
 
 type EnrollmentService struct {
-	employeeRepo *postgres.EmployeeRepo
-	deviceRepo   *postgres.DeviceRepo
+	employeeRepo          *postgres.EmployeeRepo
+	deviceRepo            *postgres.DeviceRepo
+	roleRepo              *postgres.RoleRepo
+	appClassificationRepo *postgres.AppClassificationRepo
+	alertRuleRepo         *postgres.AlertRuleRepo
+	policyRepo            *postgres.PolicyRepo
 }
 
-func NewEnrollmentService(employeeRepo *postgres.EmployeeRepo, deviceRepo *postgres.DeviceRepo) *EnrollmentService {
+func NewEnrollmentService(
+	employeeRepo *postgres.EmployeeRepo,
+	deviceRepo *postgres.DeviceRepo,
+	roleRepo *postgres.RoleRepo,
+	appClassificationRepo *postgres.AppClassificationRepo,
+	alertRuleRepo *postgres.AlertRuleRepo,
+	policyRepo *postgres.PolicyRepo,
+) *EnrollmentService {
 	return &EnrollmentService{
-		employeeRepo: employeeRepo,
-		deviceRepo:   deviceRepo,
+		employeeRepo:          employeeRepo,
+		deviceRepo:            deviceRepo,
+		roleRepo:              roleRepo,
+		appClassificationRepo: appClassificationRepo,
+		alertRuleRepo:         alertRuleRepo,
+		policyRepo:            policyRepo,
 	}
+}
+
+func (s *EnrollmentService) buildRules(ctx context.Context, employee *domain.Employee) domain.RuleSetResponse {
+	rules := domain.RuleSetResponse{
+		AppClassifications: []domain.AppClassification{},
+		AlertRules:        []domain.AlertRule{},
+		Policy: domain.Policy{
+			ID:                uuid.New(),
+			TenantID:          employee.CompanyID,
+			UploadInterval:    300,
+			ScreenshotEnabled: false,
+			ScreenshotPolicy:  "metadata_only",
+		},
+	}
+
+	if employee.RoleID != nil {
+		if role, err := s.roleRepo.GetByID(ctx, *employee.RoleID); err == nil {
+			rules.RoleInfo = &domain.RoleInfo{
+				ID:                role.ID,
+				Name:              role.Name,
+				Description:       role.Description,
+				WorkDescription:   role.WorkDescription,
+				AllowedCategories: role.AllowedCategories,
+				BlockedCategories: role.BlockedCategories,
+			}
+		}
+
+		if acs, err := s.appClassificationRepo.ListByRole(ctx, *employee.RoleID); err == nil {
+			rules.AppClassifications = acs
+		}
+
+		if ars, err := s.alertRuleRepo.ListByRole(ctx, *employee.RoleID); err == nil {
+			rules.AlertRules = ars
+		}
+
+		if policy, err := s.policyRepo.GetByTenantID(ctx, employee.CompanyID); err == nil && policy != nil {
+			rules.Policy = *policy
+		}
+	}
+
+	return rules
 }
 
 func (s *EnrollmentService) Enroll(ctx context.Context, req domain.EnrollmentRequest) (*domain.EnrollmentResponse, error) {
@@ -88,17 +144,7 @@ func (s *EnrollmentService) Enroll(ctx context.Context, req domain.EnrollmentReq
 					Employee:    *employee,
 					DeviceToken: deviceToken,
 					Status:      existing.Status,
-					Rules: domain.RuleSetResponse{
-						AppClassifications: []domain.AppClassification{},
-						AlertRules:        []domain.AlertRule{},
-						Policy: domain.Policy{
-							ID:                uuid.New(),
-							TenantID:          employee.CompanyID,
-							UploadInterval:    300,
-							ScreenshotEnabled: false,
-							ScreenshotPolicy:  "metadata_only",
-						},
-					},
+					Rules: s.buildRules(ctx, employee),
 				}
 				return response, nil
 			}
@@ -152,17 +198,7 @@ func (s *EnrollmentService) Enroll(ctx context.Context, req domain.EnrollmentReq
 		Employee:    *employee,
 		DeviceToken: deviceToken,
 		Status:      "pending",
-		Rules: domain.RuleSetResponse{
-			AppClassifications: []domain.AppClassification{},
-			AlertRules:        []domain.AlertRule{},
-			Policy: domain.Policy{
-				ID:                uuid.New(),
-				TenantID:          employee.CompanyID,
-				UploadInterval:    300,
-				ScreenshotEnabled: false,
-				ScreenshotPolicy:  "metadata_only",
-			},
-		},
+		Rules: s.buildRules(ctx, employee),
 	}
 
 	return response, nil
@@ -331,17 +367,7 @@ func (s *EnrollmentService) EnrollWithToken(ctx context.Context, req domain.Enro
 					Employee:    *employee,
 					DeviceToken: deviceToken,
 					Status:      existing.Status,
-					Rules: domain.RuleSetResponse{
-						AppClassifications: []domain.AppClassification{},
-						AlertRules:        []domain.AlertRule{},
-						Policy: domain.Policy{
-							ID:                uuid.New(),
-							TenantID:          employee.CompanyID,
-							UploadInterval:    300,
-							ScreenshotEnabled: false,
-							ScreenshotPolicy:  "metadata_only",
-						},
-					},
+					Rules: s.buildRules(ctx, employee),
 				}
 				return response, nil
 			}
@@ -395,17 +421,7 @@ func (s *EnrollmentService) EnrollWithToken(ctx context.Context, req domain.Enro
 		Employee:    *employee,
 		DeviceToken: deviceToken,
 		Status:      "active",
-		Rules: domain.RuleSetResponse{
-			AppClassifications: []domain.AppClassification{},
-			AlertRules:        []domain.AlertRule{},
-			Policy: domain.Policy{
-				ID:                uuid.New(),
-				TenantID:          employee.CompanyID,
-				UploadInterval:    300,
-				ScreenshotEnabled: false,
-				ScreenshotPolicy:  "metadata_only",
-			},
-		},
+		Rules: s.buildRules(ctx, employee),
 	}
 
 	return response, nil

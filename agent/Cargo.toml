@@ -34,3 +34,5 @@ agent-comms = { path = "shared/agent-comms" }
 rust_socketio = { version = "0.6", features = ["async"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 openssl-sys = { version = "0.9", features = ["vendored"] }
+async-trait = "0.1"
+encoding_rs = "0.8"

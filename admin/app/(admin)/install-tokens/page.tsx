@@ -304,8 +304,8 @@ export default function InstallTokensPage() {
 
   function parseInstallCommands(installCmd: string): { linux: string; windows: string } {
     const defaults = {
-      linux: `curl -fsSL http://173.249.47.143:8440/v1/install.sh | sudo bash -s -- --token ${installCmd.split("--token ")[1] || ""}`,
-      windows: `powershell -c "iwr http://173.249.47.143:8440/v1/install.ps1 | iex" -- -token ${installCmd.split("--token ")[1]?.split(" ")[0] || ""}`,
+      linux: `curl -fsSL http://localhost:8440/v1/install.sh | sudo bash -s -- --token ${installCmd.split("--token ")[1] || ""}`,
+      windows: `powershell -c "iwr http://localhost:8440/v1/install.ps1 | iex" -- -token ${installCmd.split("--token ")[1]?.split(" ")[0] || ""}`,
     };
 
     const tokenMatch = installCmd.match(/--token\s+(\S+)/);
@@ -313,8 +313,8 @@ export default function InstallTokensPage() {
 
     if (token) {
       return {
-        linux: `curl -fsSL http://173.249.47.143:8440/v1/install.sh | sudo bash -s -- --token ${token}`,
-        windows: `powershell -c "iwr http://173.249.47.143:8440/v1/install.ps1 | iex" -- -token ${token}`,
+        linux: `curl -fsSL http://localhost:8440/v1/install.sh | sudo bash -s -- --token ${token}`,
+        windows: `powershell -c "iwr http://localhost:8440/v1/install.ps1 | iex" -- -token ${token}`,
       };
     }
 

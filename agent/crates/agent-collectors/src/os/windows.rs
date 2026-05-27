@@ -2,11 +2,83 @@ use crate::active_window::{ActiveWindow, ProcessInfo};
 use agent_proto::events::NetworkConnection;
 
 pub fn get_active_window() -> Option<ActiveWindow> {
-    todo!()
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId};
+
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd == HWND::default() {
+            return None;
+        }
+
+        let mut title_buf = [0u16; 512];
+        let title_len = GetWindowTextW(hwnd, &mut title_buf);
+        let title = String::from_utf16_lossy(&title_buf[..title_len as usize]);
+
+        let mut pid: u32 = 0;
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+
+        let process_name = get_process_name_by_pid(pid);
+
+        Some(ActiveWindow {
+            title,
+            process_name,
+            process_id: pid as i32,
+        })
+    }
+}
+
+fn get_process_name_by_pid(pid: u32) -> String {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
+    use windows::core::PWSTR;
+
+    unsafe {
+        let process = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(h) => h,
+            Err(_) => return String::new(),
+        };
+
+        let mut name_buf = [0u16; 512];
+        let mut name_size = name_buf.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            process,
+            windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0),
+            PWSTR(name_buf.as_mut_ptr()),
+            &mut name_size,
+        );
+
+        let _ = CloseHandle(process);
+
+        if result.is_ok() && name_size > 0 {
+            let full_path = String::from_utf16_lossy(&name_buf[..name_size as usize]);
+            std::path::Path::new(&full_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            String::new()
+        }
+    }
 }
 
 pub fn get_idle_seconds() -> f64 {
-    todo!()
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    use windows::Win32::System::SystemInformation::GetTickCount;
+
+    unsafe {
+        let mut lii = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            dwTime: 0,
+        };
+        if !GetLastInputInfo(&mut lii).as_bool() {
+            return 0.0;
+        }
+        let tick_count = GetTickCount();
+        let idle_ms = tick_count.wrapping_sub(lii.dwTime);
+        idle_ms as f64 / 1000.0
+    }
 }
 
 pub fn get_running_applications() -> Vec<ProcessInfo> {

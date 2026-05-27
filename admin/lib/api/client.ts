@@ -1,6 +1,6 @@
 import { clearAuth } from "@/lib/auth/session";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://173.249.47.143:8440";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8440";
 
 interface RequestOptions extends RequestInit {
   params?: Record<string, string>;

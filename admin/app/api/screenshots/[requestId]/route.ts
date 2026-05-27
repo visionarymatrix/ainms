@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://173.249.47.143:8440";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8440";
 
 export async function GET(
   request: NextRequest,

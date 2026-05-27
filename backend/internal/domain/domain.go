@@ -116,6 +116,34 @@ type AppClassification struct {
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 }
 
+type Role struct {
+	ID                uuid.UUID `json:"id" db:"id"`
+	CompanyID         uuid.UUID `json:"company_id" db:"company_id"`
+	Name              string    `json:"name" db:"name"`
+	Description       string    `json:"description" db:"description"`
+	WorkDescription   string    `json:"work_description" db:"work_description"`
+	AllowedCategories []string  `json:"allowed_categories" db:"allowed_categories"`
+	BlockedCategories []string  `json:"blocked_categories" db:"blocked_categories"`
+	CreatedAt         time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at" db:"updated_at"`
+}
+
+type CreateRoleRequest struct {
+	Name              string   `json:"name" validate:"required,min=1,max=255"`
+	Description       string   `json:"description" validate:"omitempty"`
+	WorkDescription   string   `json:"work_description" validate:"omitempty"`
+	AllowedCategories []string `json:"allowed_categories" validate:"omitempty"`
+	BlockedCategories []string `json:"blocked_categories" validate:"omitempty"`
+}
+
+type UpdateRoleRequest struct {
+	Name              *string  `json:"name" validate:"omitempty,min=1,max=255"`
+	Description       *string  `json:"description" validate:"omitempty"`
+	WorkDescription   *string  `json:"work_description" validate:"omitempty"`
+	AllowedCategories []string `json:"allowed_categories" validate:"omitempty"`
+	BlockedCategories []string `json:"blocked_categories" validate:"omitempty"`
+}
+
 type AlertRule struct {
 	ID           uuid.UUID `json:"id" db:"id"`
 	RoleID       uuid.UUID `json:"role_id" db:"role_id"`
@@ -135,10 +163,20 @@ type Policy struct {
 	UpdatedAt         time.Time `json:"updated_at" db:"updated_at"`
 }
 
+type RoleInfo struct {
+	ID                uuid.UUID `json:"id"`
+	Name              string    `json:"name"`
+	Description       string    `json:"description"`
+	WorkDescription   string    `json:"work_description"`
+	AllowedCategories []string  `json:"allowed_categories"`
+	BlockedCategories []string  `json:"blocked_categories"`
+}
+
 type RuleSetResponse struct {
 	AppClassifications []AppClassification `json:"app_classifications"`
 	AlertRules        []AlertRule          `json:"alert_rules"`
 	Policy            Policy               `json:"policy"`
+	RoleInfo          *RoleInfo            `json:"role_info,omitempty"`
 }
 
 type BulkEventRequest struct {

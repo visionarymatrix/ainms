@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,19 +12,35 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { getCompanyId } from "@/lib/auth/session";
 import { registerEmployee } from "@/lib/api/employees";
+import { listRoles, type Role } from "@/lib/api/roles";
 
 export default function NewEmployeePage() {
   const router = useRouter();
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
+  const [selectedRoleId, setSelectedRoleId] = useState<string>("");
+  const [roles, setRoles] = useState<Role[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
   const [createdId, setCreatedId] = useState("");
   const companyId = getCompanyId();
+
+  useEffect(() => {
+    if (companyId) {
+      listRoles(companyId).then(setRoles).catch(() => setRoles([]));
+    }
+  }, [companyId]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -39,6 +55,7 @@ export default function NewEmployeePage() {
         first_name: firstName,
         last_name: lastName,
         email: email || undefined,
+        role_id: selectedRoleId || undefined,
       });
       setCreatedId(emp.employee_id);
       setSuccess(true);
@@ -125,6 +142,21 @@ export default function NewEmployeePage() {
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="jane@acme.com"
               />
+            </div>
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="emp-role">Role</Label>
+              <Select value={selectedRoleId} onValueChange={setSelectedRoleId}>
+                <SelectTrigger id="emp-role">
+                  <SelectValue placeholder="No role assigned" />
+                </SelectTrigger>
+                <SelectContent>
+                  {roles.map((role) => (
+                    <SelectItem key={role.id} value={role.id}>
+                      {role.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="flex gap-2 pt-4">
               <Button type="submit" disabled={loading}>

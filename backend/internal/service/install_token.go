@@ -14,7 +14,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const serverBaseURL = "http://173.249.47.143:8440"
+const serverBaseURL = "http://127.0.0.1:8440"
 
 type InstallTokenService struct {
 	tokenRepo    *postgres.InstallTokenRepo

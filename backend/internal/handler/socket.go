@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 
 	"github.com/ainms/gateway/internal/service"
@@ -116,6 +117,7 @@ func (h *SocketHandler) handleAgentConnect(s *socketio.Socket) {
 	log.Printf("[SocketHandler] agent connected: device=%s company=%s socket=%s", deviceID, companyID, s.Id())
 
 	s.On("screenshot_ready", h.handleScreenshotReady(s, connInfo))
+	s.On("agent_report", h.handleAgentReport(s, connInfo))
 
 	s.On("disconnect", func(args ...any) {
 		log.Printf("[SocketHandler] agent disconnect: device=%s", deviceID)
@@ -280,6 +282,33 @@ func (h *SocketHandler) handleScreenshotReady(s *socketio.Socket, connInfo *serv
 			"device_id":  connInfo.DeviceID,
 			"company_id": connInfo.CompanyID,
 		})
+	}
+}
+
+func (h *SocketHandler) handleAgentReport(s *socketio.Socket, connInfo *service.SocketConnInfo) func(...any) {
+	return func(args ...any) {
+		if len(args) == 0 {
+			log.Printf("[SocketHandler] agent_report: no payload from device=%s", connInfo.DeviceID)
+			return
+		}
+
+		bytes, _ := json.Marshal(args[0])
+		log.Printf("[SocketHandler] agent_report: device=%s payload=%s", connInfo.DeviceID, string(bytes))
+
+		// Enrich the payload with device and company metadata
+		enriched := map[string]interface{}{}
+		if data, ok := args[0].(map[string]interface{}); ok {
+			for k, v := range data {
+				enriched[k] = v
+			}
+		} else {
+			enriched["raw"] = args[0]
+		}
+		enriched["device_id"] = connInfo.DeviceID
+		enriched["company_id"] = connInfo.CompanyID
+
+		// Relay enriched report to company admins
+		h.hub.BroadcastToCompanyAdmins(connInfo.CompanyID, "agent_report", enriched)
 	}
 }
 

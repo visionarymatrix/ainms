@@ -52,13 +52,52 @@ pub struct EmployeeInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppClassificationRule {
+    pub app_name: String,
+    pub category: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertRuleInfo {
+    pub category: String,
+    pub threshold_min: i32,
+    pub popup_type: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PolicyInfo {
+    #[serde(default)]
+    pub upload_interval: i32,
+    #[serde(default)]
+    pub screenshot_enabled: bool,
+    #[serde(default)]
+    pub screenshot_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleInfo {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub work_description: String,
+    #[serde(default)]
+    pub allowed_categories: Vec<String>,
+    #[serde(default)]
+    pub blocked_categories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RulesInfo {
     #[serde(default)]
-    pub app_classifications: Vec<serde_json::Value>,
+    pub app_classifications: Vec<AppClassificationRule>,
     #[serde(default)]
-    pub alert_rules: Vec<serde_json::Value>,
+    pub alert_rules: Vec<AlertRuleInfo>,
     #[serde(default)]
-    pub policy: serde_json::Value,
+    pub policy: PolicyInfo,
+    #[serde(default)]
+    pub role: Option<RoleInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,4 +273,27 @@ pub struct BulkNetworkEventRequest {
     pub device_id: String,
     pub summary: NetworkTrafficSummary,
     pub connections: Vec<NetworkConnection>,
+}
+
+// ── Browser tab monitoring events ────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserTabEvent {
+    pub device_id: String,
+    pub timestamp: DateTime<Utc>,
+    pub tabs: Vec<BrowserTabInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserTabInfo {
+    pub title: String,
+    pub url: String,
+    pub browser: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkBrowserTabRequest {
+    pub device_id: String,
+    pub tabs: Vec<BrowserTabInfo>,
 }

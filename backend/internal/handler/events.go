@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -104,6 +106,59 @@ func PopupEvent(svc *clickhouse.EventRepo) http.HandlerFunc {
 			return
 		}
 
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+}
+
+func BrowserTabsEvent(svc *clickhouse.EventRepo) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			DeviceID string `json:"device_id"`
+			Tabs     []struct {
+				Title   string `json:"title"`
+				URL     string `json:"url"`
+				Browser string `json:"browser"`
+				Active  bool   `json:"active"`
+			} `json:"tabs"`
+		}
+		if err := decodeJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		log.Printf("[BrowserTabs] device=%s tab_count=%d", req.DeviceID, len(req.Tabs))
+
+		// For now, just log and acknowledge. Analytics storage can be added later.
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+}
+
+func NetworkTrafficEvent(svc *clickhouse.EventRepo) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			DeviceID    string          `json:"device_id"`
+			Summary     json.RawMessage  `json:"summary"`
+			Connections []struct {
+				Protocol        string  `json:"protocol"`
+				LocalIP         string  `json:"local_ip"`
+				LocalPort       uint16  `json:"local_port"`
+				RemoteIP        string  `json:"remote_ip"`
+				RemotePort      uint16  `json:"remote_port"`
+				State           string  `json:"state"`
+				ProcessID       int32   `json:"process_id"`
+				ProcessName     string  `json:"process_name"`
+				RemoteHostname  *string `json:"remote_hostname"`
+				ReconstructedURL *string `json:"reconstructed_url"`
+			} `json:"connections"`
+		}
+		if err := decodeJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		log.Printf("[NetworkTraffic] device=%s conn_count=%d", req.DeviceID, len(req.Connections))
+
+		// For now, just log and acknowledge. Analytics storage can be added later.
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
 }

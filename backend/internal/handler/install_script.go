@@ -13,11 +13,11 @@ func InstallPSScript() http.HandlerFunc {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte("Error: token query parameter is required\n"))
-			w.Write([]byte("Usage: powershell -c \"iwr 'http://173.249.47.143:8440/v1/install.ps1?token=YOUR_TOKEN' -UseBasicParsing | iex\"\n"))
+			w.Write([]byte("Usage: powershell -c \"iwr 'http://127.0.0.1:8440/v1/install.ps1?token=YOUR_TOKEN' -UseBasicParsing | iex\"\n"))
 			return
 		}
 
-		serverBaseURL := "http://173.249.47.143:8440"
+		serverBaseURL := "http://127.0.0.1:8440"
 
 		var b strings.Builder
 		fmt.Fprintf(&b, "$ErrorActionPreference = \"Stop\"\n\n")
@@ -141,7 +141,7 @@ func InstallShellScript() http.HandlerFunc {
 	fmt.Fprintf(&b, "#!/usr/bin/env bash\n")
 	fmt.Fprintf(&b, "set -euo pipefail\n\n")
 	fmt.Fprintf(&b, "TOKEN=\"\"\n")
-	fmt.Fprintf(&b, "SERVER=\"http://173.249.47.143:8440\"\n\n")
+		fmt.Fprintf(&b, "SERVER=\"http://127.0.0.1:8440\"\n\n")
 	fmt.Fprintf(&b, "for arg in \"$@\"; do\n")
 	fmt.Fprintf(&b, "  case \"$arg\" in\n")
 	fmt.Fprintf(&b, "    --token=*) TOKEN=\"${arg#*=}\" ;;\n")

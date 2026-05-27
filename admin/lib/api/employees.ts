@@ -75,3 +75,35 @@ export async function requestScreenshot(deviceId: string): Promise<ScreenshotReq
 export async function getDeviceScreenshots(deviceId: string): Promise<ScreenshotRequest[]> {
   return api.get<ScreenshotRequest[]>(`/v1/devices/${deviceId}/screenshots`);
 }
+
+export interface NLQueryResponse {
+  query_id: string;
+  employee_id: string;
+  device_id?: string;
+  status: string;
+}
+
+export interface AgentReport {
+  query_id: string;
+  device_id: string;
+  query: string;
+  timestamp: string;
+  summary?: {
+    total_events: number;
+    classification_breakdown: Record<string, { count: number; duration_sec: number }>;
+    top_apps: Array<{ app_name: string; duration_sec: number; classification: string }>;
+    network_summary?: {
+      total_connections: number;
+      unique_domains: string[];
+    };
+    role?: {
+      name: string;
+      work_description: string;
+    };
+  };
+  report_text: string;
+}
+
+export async function sendNLQuery(employeeId: string, query: string): Promise<NLQueryResponse> {
+  return api.post<NLQueryResponse>(`/v1/employees/${employeeId}/nl-query`, { query });
+}

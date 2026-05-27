@@ -43,12 +43,20 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Separator } from "@/components/ui/separator";
-import { Plus, Trash2, Copy, Eye, EyeOff, RefreshCw, Monitor, Terminal, Laptop, CloudOff, Camera } from "lucide-react";
+import { Plus, Trash2, Copy, Eye, EyeOff, RefreshCw, Monitor, Terminal, Laptop, CloudOff, Camera, Send, MessageSquare } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
 import { getUser, getCompanyId, getToken } from "@/lib/auth/session";
-import { listEmployees, registerEmployee, deactivateEmployee, getEmployeeDevices, requestScreenshot, getDeviceScreenshots, type Employee, type Device, type ScreenshotRequest } from "@/lib/api/employees";
+import { listEmployees, registerEmployee, deactivateEmployee, getEmployeeDevices, requestScreenshot, getDeviceScreenshots, sendNLQuery, type Employee, type Device, type ScreenshotRequest, type NLQueryResponse, type AgentReport } from "@/lib/api/employees";
 import { getEmployeeInstallToken, type EmployeeInstallToken } from "@/lib/api/install-tokens";
+import { listRoles, getRole, type Role } from "@/lib/api/roles";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useSocket } from "@/lib/socket";
 
 const statusBadge: Record<string, "default" | "destructive" | "outline"> = {
@@ -129,6 +137,11 @@ function EmployeeDetailDialog({ employee, open, onOpenChange, onDeactivate }: Em
   const [screenshotsLoading, setScreenshotsLoading] = useState(false);
   const [screenshotRequesting, setScreenshotRequesting] = useState<string | null>(null);
   const [viewingScreenshot, setViewingScreenshot] = useState<ScreenshotRequest | null>(null);
+  const [role, setRole] = useState<Role | null>(null);
+  const [roleLoading, setRoleLoading] = useState(false);
+  const [nlQuery, setNlQuery] = useState("");
+  const [nlQueryLoading, setNlQueryLoading] = useState(false);
+  const [nlReports, setNlReports] = useState<Array<{ query: string; query_id: string; report: AgentReport | null; timestamp: string }>>([]);
 
   const { on } = useSocket(getToken());
 
@@ -232,6 +245,21 @@ function EmployeeDetailDialog({ employee, open, onOpenChange, onDeactivate }: Em
     }
   }, []);
 
+  const handleSendNLQuery = useCallback(async () => {
+    if (!employee || !nlQuery.trim()) return;
+    setNlQueryLoading(true);
+    const queryText = nlQuery.trim();
+    setNlQuery("");
+    try {
+      const resp = await sendNLQuery(employee.id, queryText);
+      setNlReports((prev) => [...prev, { query: queryText, query_id: resp.query_id, report: null, timestamp: new Date().toISOString() }]);
+    } catch {
+      toast.error("Failed to send query to agent");
+    } finally {
+      setNlQueryLoading(false);
+    }
+  }, [employee, nlQuery]);
+
   useEffect(() => {
     if (open && employee) {
       fetchDevices();
@@ -251,8 +279,24 @@ function EmployeeDetailDialog({ employee, open, onOpenChange, onDeactivate }: Em
       setActiveTab("linux");
       setScreenshots([]);
       setViewingScreenshot(null);
+      setRole(null);
+      setNlReports([]);
+      setNlQuery("");
     }
   }, [open]);
+
+  useEffect(() => {
+    if (open && employee?.role_id) {
+      setRoleLoading(true);
+      getRole(employee.role_id)
+        .then(setRole)
+        .catch(() => setRole(null))
+        .finally(() => setRoleLoading(false));
+    } else {
+      setRole(null);
+      setRoleLoading(false);
+    }
+  }, [open, employee?.role_id]);
 
   useEffect(() => {
     const offOnline = on("device_online", (data: { device_id: string }) => {
@@ -277,10 +321,20 @@ function EmployeeDetailDialog({ employee, open, onOpenChange, onDeactivate }: Em
       delete pendingRequestIds.current[data.device_id];
       fetchScreenshots();
     });
+    const offAgentReport = on("agent_report", (data: AgentReport) => {
+      if (data.query_id) {
+        setNlReports((prev) =>
+          prev.map((r) =>
+            r.query_id === data.query_id ? { ...r, report: data } : r
+          )
+        );
+      }
+    });
     return () => {
       offOnline();
       offOffline();
       offScreenshotReady();
+      offAgentReport();
     };
   }, [on, fetchScreenshots]);
 
@@ -315,6 +369,30 @@ function EmployeeDetailDialog({ employee, open, onOpenChange, onDeactivate }: Em
 
           <div className="flex-1 overflow-y-auto">
             <div className="px-6 py-4 space-y-6">
+
+              {employee.role_id && (
+                <div>
+                  <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
+                    Role
+                  </h3>
+                  {roleLoading ? (
+                    <Skeleton className="h-12 w-full rounded-lg" />
+                  ) : role ? (
+                    <div className="rounded-lg border bg-card px-3 py-2.5 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <Badge variant="secondary" className="text-xs">{role.name}</Badge>
+                        <span className="text-sm font-medium">{role.name}</span>
+                      </div>
+                      {role.work_description && (
+                        <p className="text-xs text-muted-foreground">{role.work_description}</p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Role information unavailable</p>
+                  )}
+                  <Separator className="mt-6" />
+                </div>
+              )}
 
               <div>
                 <div className="flex items-center justify-between mb-3">
@@ -474,6 +552,75 @@ function EmployeeDetailDialog({ employee, open, onOpenChange, onDeactivate }: Em
 
               <div>
                 <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
+                  <MessageSquare className="h-4 w-4 text-muted-foreground shrink-0" />
+                  Query Agent
+                </h3>
+
+                <div className="space-y-3">
+                  {nlReports.length > 0 && (
+                    <div className="space-y-3 max-h-64 overflow-y-auto">
+                      {nlReports.map((entry, idx) => (
+                        <div key={idx} className="space-y-2">
+                          <div className="flex justify-end">
+                            <div className="rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm max-w-[80%]">
+                              {entry.query}
+                            </div>
+                          </div>
+                          {entry.report ? (
+                            <div className="flex justify-start">
+                              <div className="rounded-lg border bg-card px-3 py-2 text-sm max-w-[80%] space-y-2">
+                                <p>{entry.report.report_text}</p>
+                                {entry.report.summary && (
+                                  <div className="text-xs text-muted-foreground space-y-1">
+                                    <p>Events: {entry.report.summary.total_events}</p>
+                                    {entry.report.summary.top_apps.length > 0 && (
+                                      <p>Top apps: {entry.report.summary.top_apps.slice(0, 3).map(a => `${a.app_name} (${Math.round(a.duration_sec / 60)}min)`).join(', ')}</p>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="flex justify-start">
+                              <div className="rounded-lg border bg-muted px-3 py-2 text-sm text-muted-foreground flex items-center gap-2">
+                                <RefreshCw className="h-3 w-3 animate-spin" />
+                                Waiting for agent response...
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="flex gap-2">
+                    <Input
+                      placeholder="Ask about this employee's activity..."
+                      value={nlQuery}
+                      onChange={(e) => setNlQuery(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey && !nlQueryLoading) {
+                          e.preventDefault();
+                          handleSendNLQuery();
+                        }
+                      }}
+                      disabled={nlQueryLoading || devices.length === 0}
+                      className="text-sm"
+                    />
+                    <Button size="icon" onClick={handleSendNLQuery} disabled={nlQueryLoading || !nlQuery.trim() || devices.length === 0}>
+                      <Send className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  {devices.length === 0 && (
+                    <p className="text-xs text-muted-foreground">No devices connected. Connect a device to query the agent.</p>
+                  )}
+                </div>
+              </div>
+
+              <Separator />
+
+              <div>
+                <h3 className="text-sm font-semibold flex items-center gap-2 mb-3">
                   <Terminal className="h-4 w-4 text-muted-foreground shrink-0" />
                   Install Command
                 </h3>
@@ -616,6 +763,8 @@ export default function EmployeesPage() {
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
+  const [selectedRoleId, setSelectedRoleId] = useState<string>("");
+  const [roles, setRoles] = useState<Role[]>([]);
   const [creating, setCreating] = useState(false);
   const user = getUser();
   const companyId = getCompanyId();
@@ -628,6 +777,12 @@ export default function EmployeesPage() {
       fetchEmployees();
     } else {
       setLoading(false);
+    }
+  }, [companyId]);
+
+  useEffect(() => {
+    if (companyId) {
+      listRoles(companyId).then(setRoles).catch(() => setRoles([]));
     }
   }, [companyId]);
 
@@ -648,15 +803,17 @@ export default function EmployeesPage() {
     if (!companyId) return;
     setCreating(true);
     try {
-      await registerEmployee(companyId, {
-        first_name: firstName,
-        last_name: lastName,
-        email: email || undefined,
-      });
-      setDialogOpen(false);
-      setFirstName("");
-      setLastName("");
-      setEmail("");
+              await registerEmployee(companyId, {
+                first_name: firstName,
+                last_name: lastName,
+                email: email || undefined,
+                role_id: selectedRoleId || undefined,
+              });
+              setDialogOpen(false);
+              setFirstName("");
+              setLastName("");
+              setEmail("");
+              setSelectedRoleId("");
       await fetchEmployees();
     } catch {
       setDialogOpen(false);
@@ -774,6 +931,21 @@ export default function EmployeesPage() {
                         onChange={(e) => setEmail(e.target.value)}
                         placeholder="jane@acme.com"
                       />
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <Label htmlFor="emp-role">Role</Label>
+                      <Select value={selectedRoleId} onValueChange={setSelectedRoleId}>
+                        <SelectTrigger id="emp-role">
+                          <SelectValue placeholder="No role assigned" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {roles.map((role) => (
+                            <SelectItem key={role.id} value={role.id}>
+                              {role.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
                     <Button type="submit" disabled={creating}>
                       {creating ? "Adding..." : "Add Employee"}

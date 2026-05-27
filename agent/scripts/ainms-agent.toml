@@ -9,7 +9,7 @@ employee_id = "unknown"
 company_id = "unknown"
 
 # AINMS server endpoint
-server = "http://173.249.47.143:8440"
+server = "http://localhost:8440"
 
 # Service account credentials for agent authentication
 auth_email = "superadmin@ainms.io"

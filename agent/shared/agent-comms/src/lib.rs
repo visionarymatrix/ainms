@@ -8,6 +8,7 @@ pub enum CommandMessage {
     PolicyUpdate,
     Uninstall,
     Heartbeat,
+    NLQuery { query_id: String, query: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

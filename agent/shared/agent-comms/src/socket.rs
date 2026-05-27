@@ -12,8 +12,11 @@ use rust_socketio::{Payload, TransportType};
 #[derive(Debug, Clone)]
 pub enum SocketCommand {
     ScreenshotRequest { command_id: String, payload: Value },
+    PolicyUpdate { command_id: String, payload: Value },
+    NLQuery { query_id: String, query: String, payload: Value },
 }
 
+#[derive(Clone)]
 pub struct SocketClient {
     client: Client,
     connected: Arc<std::sync::atomic::AtomicBool>,
@@ -37,7 +40,9 @@ pub async fn connect_socket(
     let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let connected_connect = connected.clone();
     let connected_disconnect = connected.clone();
-    let tx_event = command_tx.clone();
+    let tx_screenshot = command_tx.clone();
+    let tx_policy = command_tx.clone();
+    let tx_nl_query = command_tx.clone();
 
     info!(url = %socket_url, "Connecting to Socket.IO server");
 
@@ -68,10 +73,29 @@ pub async fn connect_socket(
             .boxed()
         })
         .on("screenshot_request", move |payload: Payload, _| {
-            let tx = tx_event.clone();
+            let tx = tx_screenshot.clone();
             async move {
                 info!("Socket.IO screenshot_request callback fired");
                 parse_screenshot_request(payload, &tx);
+            }
+            .boxed()
+        })
+        .on("policy_update", move |payload: Payload, _| {
+            let tx = tx_policy.clone();
+            async move {
+                info!("Socket.IO policy_update callback fired");
+                parse_generic_command("policy_update", payload, &tx, |id, data| SocketCommand::PolicyUpdate {
+                    command_id: id,
+                    payload: data,
+                });
+            }
+            .boxed()
+        })
+        .on("nl_query", move |payload: Payload, _| {
+            let tx = tx_nl_query.clone();
+            async move {
+                info!("Socket.IO nl_query callback fired");
+                parse_nl_query(payload, &tx);
             }
             .boxed()
         })
@@ -96,34 +120,75 @@ pub async fn connect_socket(
     ))
 }
 
-fn parse_screenshot_request(payload: Payload, tx: &mpsc::Sender<SocketCommand>) {
+fn parse_generic_command<F>(event_name: &str, payload: Payload, tx: &mpsc::Sender<SocketCommand>, make_cmd: F)
+where
+    F: FnOnce(String, Value) -> SocketCommand,
+{
     #[allow(deprecated)]
     let data: Option<Value> = match payload {
         Payload::Text(mut values) => values.pop(),
         Payload::String(s) => serde_json::from_str::<Value>(&s).ok(),
         Payload::Binary(_) => {
-            warn!("Received binary data for screenshot_request, ignoring");
+            warn!("Received binary data for {}, ignoring", event_name);
             None
         }
     };
-
     if let Some(data) = data {
         let command_id = data
-            .get("request_id")
+            .get("command_id")
             .or_else(|| data.get("id"))
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
-
-        info!(command_id = %command_id, "Received screenshot_request via Socket.IO");
-
-        if let Err(e) = tx.try_send(SocketCommand::ScreenshotRequest {
-            command_id,
-            payload: data,
-        }) {
-            error!("Failed to send screenshot command to channel: {}", e);
+        info!(command_id = %command_id, "Received {} via Socket.IO", event_name);
+        if let Err(e) = tx.try_send(make_cmd(command_id, data)) {
+            error!("Failed to send {} to channel: {}", event_name, e);
         }
     }
+}
+
+fn parse_nl_query(payload: Payload, tx: &mpsc::Sender<SocketCommand>) {
+    #[allow(deprecated)]
+    let data: Option<Value> = match payload {
+        Payload::Text(mut values) => values.pop(),
+        Payload::String(s) => serde_json::from_str::<Value>(&s).ok(),
+        Payload::Binary(_) => {
+            warn!("Received binary data for nl_query, ignoring");
+            None
+        }
+    };
+    if let Some(data) = data {
+        let query_id = data
+            .get("query_id")
+            .or_else(|| data.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let query = data
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        info!(query_id = %query_id, "Received nl_query via Socket.IO");
+        if let Err(e) = tx.try_send(SocketCommand::NLQuery { query_id, query, payload: data }) {
+            error!("Failed to send nl_query to channel: {}", e);
+        }
+    }
+}
+
+fn parse_screenshot_request(payload: Payload, tx: &mpsc::Sender<SocketCommand>) {
+    parse_generic_command("screenshot_request", payload, tx, |_command_id, payload| {
+        let req_id = payload
+            .get("request_id")
+            .or_else(|| payload.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        SocketCommand::ScreenshotRequest {
+            command_id: req_id,
+            payload,
+        }
+    });
 }
 
 impl SocketClient {
