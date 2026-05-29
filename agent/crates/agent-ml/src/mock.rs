@@ -3,17 +3,14 @@ use std::sync::Mutex;
 
 use crate::error::MlResult;
 use crate::provider::LlmProvider;
-use crate::types::GenerateOptions;
+use crate::types::{AgentResponse, ChatGenerateOptions, ChatMessage, GenerateOptions};
 use crate::ClassificationResult;
 
-/// A mock LLM provider for testing.
-///
-/// Returns pre-configured responses, useful for unit-testing code that
-/// depends on `dyn LlmProvider` without requiring an actual model file.
 pub struct MockProvider {
     loaded: std::sync::atomic::AtomicBool,
     responses: Mutex<Vec<String>>,
     classifications: Mutex<Vec<ClassificationResult>>,
+    chat_responses: Mutex<Vec<AgentResponse>>,
 }
 
 impl MockProvider {
@@ -22,21 +19,22 @@ impl MockProvider {
             loaded: std::sync::atomic::AtomicBool::new(false),
             responses: Mutex::new(Vec::new()),
             classifications: Mutex::new(Vec::new()),
+            chat_responses: Mutex::new(Vec::new()),
         }
     }
 
-    /// Pre-configure a text generation response. Responses are consumed
-    /// in FIFO order; if the queue is empty, `"mock response"` is returned.
     pub fn with_response(self, response: &str) -> Self {
         self.responses.lock().unwrap().push(response.to_string());
         self
     }
 
-    /// Pre-configure a classification result. Results are consumed in
-    /// FIFO order; if the queue is empty, a default neutral result is
-    /// returned.
     pub fn with_classification(self, result: ClassificationResult) -> Self {
         self.classifications.lock().unwrap().push(result);
+        self
+    }
+
+    pub fn with_chat_response(self, response: AgentResponse) -> Self {
+        self.chat_responses.lock().unwrap().push(response);
         self
     }
 }
@@ -69,6 +67,19 @@ impl LlmProvider for MockProvider {
             Ok("mock response".to_string())
         } else {
             Ok(responses.remove(0))
+        }
+    }
+
+    async fn chat_generate(
+        &self,
+        _messages: &[ChatMessage],
+        _options: &ChatGenerateOptions,
+    ) -> MlResult<AgentResponse> {
+        let mut chat_responses = self.chat_responses.lock().unwrap();
+        if chat_responses.is_empty() {
+            Ok(AgentResponse::Text("mock chat response".to_string()))
+        } else {
+            Ok(chat_responses.remove(0))
         }
     }
 }

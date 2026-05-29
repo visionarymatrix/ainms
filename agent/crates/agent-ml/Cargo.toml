@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 default = []
 llama-cpp = ["llama-cpp-2"]
+mtmd = ["llama-cpp-2", "llama-cpp-2/mtmd"]
 cuda = ["llama-cpp-2/cuda"]
 
 [dependencies]
@@ -19,6 +20,8 @@ agent-proto = { workspace = true }
 async-trait = { workspace = true }
 encoding_rs = { workspace = true }
 llama-cpp-2 = { version = "0.1", optional = true }
+base64 = "0.22"
+image = { version = "0.25", optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
