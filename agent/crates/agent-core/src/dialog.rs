@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use anyhow::{bail, Context, Result};
-use std::process::Command;
+use std::path::PathBuf;
 use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
@@ -9,18 +9,18 @@ pub enum DialogAnswer {
     No,
 }
 
-/// Ask the user a yes/no question via a cross-platform GUI dialog.
-///
-/// On Linux: uses `zenity --question`, falls back to `kdialog --yesno`.
-/// On Windows: uses PowerShell + System.Windows.Forms.MessageBox.
-/// On macOS:  uses `osascript` display dialog.
-///
-/// Returns `Yes` if the user confirms, `No` otherwise.
+#[derive(Debug, Clone)]
+pub struct PromptResult {
+    pub text: Option<String>,
+}
+
+// ── Public API ──────────────────────────────────────────────────────────────
+
 pub fn ask(title: &str, message: &str) -> Result<DialogAnswer> {
     match std::env::consts::OS {
-        "linux"   => ask_linux(title, message),
+        "linux" => ask_linux(title, message),
         "windows" => ask_windows(title, message),
-        "macos"   => ask_macos(title, message),
+        "macos" => ask_macos(title, message),
         other => {
             warn!("Unsupported OS '{}'; falling back to stdout", other);
             ask_stdout(title, message)
@@ -28,16 +28,11 @@ pub fn ask(title: &str, message: &str) -> Result<DialogAnswer> {
     }
 }
 
-/// Show a system notification (cross-platform).
-///
-/// On Linux: uses `notify-send`, falls back to `zenity --info`.
-/// On Windows: uses `msg` command.
-/// On macOS: uses `osascript` display notification.
 pub fn notify(title: &str, message: &str) -> Result<()> {
     match std::env::consts::OS {
-        "linux"   => notify_linux(title, message),
+        "linux" => notify_linux(title, message),
         "windows" => notify_windows(title, message),
-        "macos"   => notify_macos(title, message),
+        "macos" => notify_macos(title, message),
         other => {
             warn!("Unsupported OS '{}'; falling back to stdout", other);
             info!("NOTIFICATION: [{}] {}", title, message);
@@ -46,10 +41,403 @@ pub fn notify(title: &str, message: &str) -> Result<()> {
     }
 }
 
-/* ── Linux ──────────────────────────────────────────────────────────── */
+pub fn prompt(title: &str, message: &str) -> Result<PromptResult> {
+    match std::env::consts::OS {
+        "linux" => prompt_linux(title, message),
+        "windows" => prompt_windows(title, message),
+        "macos" => prompt_macos(title, message),
+        other => {
+            warn!("Unsupported OS '{}'; falling back to stdout", other);
+            prompt_stdout(title, message)
+        }
+    }
+}
+
+// ── Windows (Win32 API) ────────────────────────────────────────────────────
+
+#[cfg(target_os = "windows")]
+fn ask_windows(title: &str, message: &str) -> Result<DialogAnswer> {
+    if is_session_zero() {
+        info!("Running in Session 0, spawning dialog helper in user session");
+        return spawn_dialog_helper_in_user_session("ask", title, message);
+    }
+    ask_windows_direct(title, message)
+}
+
+#[cfg(target_os = "windows")]
+fn notify_windows(title: &str, message: &str) -> Result<()> {
+    if is_session_zero() {
+        info!("Running in Session 0, spawning dialog helper in user session");
+        let _ = spawn_dialog_helper_in_user_session("notify", title, message);
+        return Ok(());
+    }
+    notify_windows_direct(title, message)
+}
+
+#[cfg(target_os = "windows")]
+fn prompt_windows(title: &str, message: &str) -> Result<PromptResult> {
+    if is_session_zero() {
+        info!("Running in Session 0, spawning dialog helper in user session");
+        return spawn_prompt_helper_in_user_session(title, message);
+    }
+    prompt_windows_direct(title, message)
+}
+
+#[cfg(target_os = "windows")]
+fn ask_windows_direct(title: &str, message: &str) -> Result<DialogAnswer> {
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO};
+
+    let title_w = encode_wide(title);
+    let message_w = encode_wide(message);
+
+    unsafe {
+        let result = MessageBoxW(
+            None,
+            windows::core::PCWSTR(message_w.as_ptr()),
+            windows::core::PCWSTR(title_w.as_ptr()),
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+        );
+        if result == IDYES {
+            Ok(DialogAnswer::Yes)
+        } else {
+            Ok(DialogAnswer::No)
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn notify_windows_direct(title: &str, message: &str) -> Result<()> {
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
+
+    let title_w = encode_wide(title);
+    let message_w = encode_wide(message);
+
+    unsafe {
+        MessageBoxW(
+            None,
+            windows::core::PCWSTR(message_w.as_ptr()),
+            windows::core::PCWSTR(title_w.as_ptr()),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn prompt_windows_direct(title: &str, message: &str) -> Result<PromptResult> {
+    use windows::Win32::UI::WindowsAndMessaging::*;
+
+    let title_w = encode_wide(title);
+    let message_w = encode_wide(message);
+
+    let template = build_prompt_dialog_template(&title_w, &message_w);
+
+    unsafe {
+        let result = DialogBoxIndirectParamW(
+            None,
+            template.as_ptr() as *const _,
+            None,
+            Some(prompt_dialog_proc),
+            windows::Win32::Foundation::LPARAM(0),
+        );
+
+        if result == 1 {
+            let path = dialog_result_path();
+            if path.exists() {
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let _ = std::fs::remove_file(&path);
+                if text.is_empty() {
+                    Ok(PromptResult { text: None })
+                } else {
+                    Ok(PromptResult { text: Some(text) })
+                }
+            } else {
+                Ok(PromptResult { text: None })
+            }
+        } else {
+            Ok(PromptResult { text: None })
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn build_prompt_dialog_template(title_w: &[u16], message_w: &[u16]) -> Vec<u8> {
+    // DLGTEMPLATE memory layout (DWORD-aligned):
+    //   DLGTEMPLATE (18 bytes) + menu(2) + class(2) + title(var) + font(var)
+    //   then DLGITEMTEMPLATE × cdit, each DWORD-aligned
+    //
+    // DLGTEMPLATE: style(4) + exStyle(4) + cdit(2) + x(2) + y(2) + cx(2) + cy(2)
+    // menu/class/title: each is 0x0000 or 0xFFFF+atom or null-term wstring
+    //
+    // DLGITEMTEMPLATE: style(4) + exStyle(4) + x(2) + y(2) + cx(2) + cy(2) + id(2)
+    //   then class(0xFFFF+atom or wstring) + title(wstring or 0xFFFF+id) + extra(2)
+
+    let mut t: Vec<u8> = Vec::new();
+
+    fn push16(t: &mut Vec<u8>, v: u16) { t.extend_from_slice(&v.to_le_bytes()); }
+    fn push32(t: &mut Vec<u8>, v: u32) { t.extend_from_slice(&v.to_le_bytes()); }
+    fn push_wstr(t: &mut Vec<u8>, s: &[u16]) { for &c in s { push16(t, c); } }
+    fn align4(t: &mut Vec<u8>) { while t.len() % 4 != 0 { t.push(0); } }
+
+    // ── DLGTEMPLATE header ──
+    push32(&mut t, 0x80C800C0); // style: WS_POPUP|WS_VISIBLE|WS_CAPTION|WS_SYSMENU|DS_CENTER|DS_MODALFRAME|DS_SHELLFONT
+    push32(&mut t, 0x00000001); // exStyle: WS_EX_DLGMODALFRAME
+    push16(&mut t, 4);          // cdit
+    push16(&mut t, 0);          // x
+    push16(&mut t, 0);          // y
+    push16(&mut t, 200);        // cx
+    push16(&mut t, 80);         // cy
+    push16(&mut t, 0);          // menu: none
+    push16(&mut t, 0);          // class: default
+    push_wstr(&mut t, title_w); // title
+    push16(&mut t, 8);          // font point size (DS_SHELLFONT)
+    push_wstr(&mut t, encode_wide("Segoe UI").as_slice());
+
+    align4(&mut t);
+
+    // ── DLGITEM 1: STATIC text, ID=101 ──
+    push32(&mut t, 0x50000000); // WS_CHILD|WS_VISIBLE
+    push32(&mut t, 0);          // exStyle
+    push16(&mut t, 7); push16(&mut t, 7);   // x,y
+    push16(&mut t, 186); push16(&mut t, 28); // cx,cy
+    push16(&mut t, 101); // id
+    push16(&mut t, 0xFFFF); push16(&mut t, 0x0082); // class=STATIC atom
+    push_wstr(&mut t, message_w); // title=message
+    push16(&mut t, 0); // extra
+
+    align4(&mut t);
+
+    // ── DLGITEM 2: EDIT, ID=102 ──
+    push32(&mut t, 0x50810080); // WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_BORDER|ES_AUTOHSCROLL
+    push32(&mut t, 0);          // exStyle
+    push16(&mut t, 7); push16(&mut t, 40);
+    push16(&mut t, 186); push16(&mut t, 14);
+    push16(&mut t, 102);
+    push16(&mut t, 0xFFFF); push16(&mut t, 0x0081); // class=EDIT atom
+    push16(&mut t, 0); // title=empty
+    push16(&mut t, 0); // extra
+
+    align4(&mut t);
+
+    // ── DLGITEM 3: BUTTON "Submit" (default push), ID=103 ──
+    push32(&mut t, 0x50010001); // WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON
+    push32(&mut t, 0);
+    push16(&mut t, 100); push16(&mut t, 58);
+    push16(&mut t, 45); push16(&mut t, 14);
+    push16(&mut t, 103);
+    push16(&mut t, 0xFFFF); push16(&mut t, 0x0080); // class=BUTTON atom
+    push_wstr(&mut t, encode_wide("Submit").as_slice());
+    push16(&mut t, 0);
+
+    align4(&mut t);
+
+    // ── DLGITEM 4: BUTTON "Dismiss", ID=104 ──
+    push32(&mut t, 0x50010000); // WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON
+    push32(&mut t, 0);
+    push16(&mut t, 148); push16(&mut t, 58);
+    push16(&mut t, 45); push16(&mut t, 14);
+    push16(&mut t, 104);
+    push16(&mut t, 0xFFFF); push16(&mut t, 0x0080); // class=BUTTON atom
+    push_wstr(&mut t, encode_wide("Dismiss").as_slice());
+    push16(&mut t, 0);
+
+    t
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn prompt_dialog_proc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    _lparam: windows::Win32::Foundation::LPARAM,
+) -> isize {
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::Win32::Foundation::*;
+
+    match msg {
+        WM_INITDIALOG => {
+            let _ = SetForegroundWindow(hwnd);
+            TRUE.0 as isize
+        }
+        WM_COMMAND => {
+            let cmd_id = (wparam.0 & 0xFFFF) as u32;
+            match cmd_id {
+                103 => {
+                    let mut buf = [0u16; 2048];
+                    let len = GetDlgItemTextW(hwnd, 102, &mut buf);
+                    let text = String::from_utf16_lossy(&buf[..len as usize]);
+                    let path = dialog_result_path();
+                    let _ = std::fs::write(&path, text.trim());
+                    let _ = EndDialog(hwnd, 1);
+                    1
+                }
+                104 => {
+                    let _ = EndDialog(hwnd, 0);
+                    0
+                }
+                _ => FALSE.0 as isize,
+            }
+        }
+        WM_CLOSE => {
+            let _ = EndDialog(hwnd, 0);
+            0
+        }
+        _ => FALSE.0 as isize,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn is_session_zero() -> bool {
+    use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+
+    unsafe {
+        let mut session_id = 0u32;
+        if ProcessIdToSessionId(GetCurrentProcessId(), &mut session_id).is_ok() {
+            return session_id == 0;
+        }
+        false
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_session_zero() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_dialog_helper_in_user_session(dialog_type: &str, title: &str, message: &str) -> Result<DialogAnswer> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
+    use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+    use windows::Win32::System::Threading::{
+        CreateProcessAsUserW, CREATE_UNICODE_ENVIRONMENT, CREATE_NO_WINDOW,
+        PROCESS_INFORMATION, STARTUPINFOW, STARTF_USESHOWWINDOW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::PWSTR;
+
+    let result_path = dialog_result_path();
+    let _ = std::fs::remove_file(&result_path);
+
+    unsafe {
+        let session_id = WTSGetActiveConsoleSessionId();
+        if session_id == 0xFFFFFFFF {
+            bail!("No active console session");
+        }
+
+        let mut user_token = windows::Win32::Foundation::HANDLE::default();
+        if WTSQueryUserToken(session_id, &mut user_token).is_err() {
+            bail!("WTSQueryUserToken failed (are we running as SYSTEM?)");
+        }
+
+        let mut env_block: *mut core::ffi::c_void = std::ptr::null_mut();
+        if CreateEnvironmentBlock(&mut env_block, user_token, false).is_err() {
+            let _ = CloseHandle(user_token);
+            bail!("CreateEnvironmentBlock failed");
+        }
+
+        let exe_path = std::env::current_exe()?;
+        let flag = format!("--dialog-{}", dialog_type);
+        let title_escaped = title.replace('"', "\\\"");
+        let msg_escaped = message.replace('"', "\\\"");
+        let title_arg = format!(r#"--dialog-title "{}""#, title_escaped);
+        let msg_arg = format!(r#"--dialog-message "{}""#, msg_escaped);
+        let cmdline = format!(r#""{}" {} {} {}"#, exe_path.display(), flag, title_arg, msg_arg);
+        let mut cmdline_wide: Vec<u16> = std::ffi::OsStr::new(&cmdline)
+            .encode_wide()
+            .chain(std::iter::once(0u16))
+            .collect();
+
+        let mut startup_info: STARTUPINFOW = std::mem::zeroed();
+        startup_info.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        startup_info.dwFlags = STARTF_USESHOWWINDOW;
+        startup_info.wShowWindow = SW_SHOWNORMAL.0 as u16;
+        let mut proc_info: PROCESS_INFORMATION = std::mem::zeroed();
+
+        let create_result = CreateProcessAsUserW(
+            user_token,
+            None,
+            PWSTR(cmdline_wide.as_mut_ptr()),
+            None,
+            None,
+            false,
+            CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+            Some(env_block),
+            None,
+            &startup_info,
+            &mut proc_info,
+        );
+
+        if !env_block.is_null() {
+            let _ = DestroyEnvironmentBlock(env_block);
+        }
+        let _ = CloseHandle(user_token);
+
+        if create_result.is_err() {
+            bail!("CreateProcessAsUserW failed for dialog helper");
+        }
+
+        let _ = CloseHandle(proc_info.hProcess);
+        let _ = CloseHandle(proc_info.hThread);
+
+        info!("Spawned dialog helper in user session {}", session_id);
+    }
+
+    let timeout = std::time::Duration::from_secs(120);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if result_path.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let content = std::fs::read_to_string(&result_path).unwrap_or_default();
+            let _ = std::fs::remove_file(&result_path);
+            if dialog_type == "ask" {
+                return if content.trim() == "yes" {
+                    Ok(DialogAnswer::Yes)
+                } else {
+                    Ok(DialogAnswer::No)
+                };
+            }
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    Ok(DialogAnswer::No)
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_prompt_helper_in_user_session(title: &str, message: &str) -> Result<PromptResult> {
+    spawn_dialog_helper_in_user_session("prompt", title, message)?;
+    let result_path = dialog_result_path();
+    if result_path.exists() {
+        let text = std::fs::read_to_string(&result_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&result_path);
+        if text.is_empty() {
+            Ok(PromptResult { text: None })
+        } else {
+            Ok(PromptResult { text: Some(text) })
+        }
+    } else {
+        Ok(PromptResult { text: None })
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn encode_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0u16)).collect()
+}
+
+fn dialog_result_path() -> PathBuf {
+    std::env::temp_dir().join("ainms_dialog_result.txt")
+}
+
+// ── Linux ────────────────────────────────────────────────────────────
 
 fn ask_linux(title: &str, message: &str) -> Result<DialogAnswer> {
-    // Try zenity first (most common on GNOME/XFCE)
+    use std::process::Command;
+
     let out = Command::new("zenity")
         .args(["--question", "--title", title, "--text", message])
         .output();
@@ -66,7 +454,6 @@ fn ask_linux(title: &str, message: &str) -> Result<DialogAnswer> {
         Err(e) => warn!("zenity failed: {}", e),
     }
 
-    // Fallback to kdialog (KDE)
     let out = Command::new("kdialog")
         .args(["--yesno", message, "--title", title])
         .output();
@@ -83,11 +470,12 @@ fn ask_linux(title: &str, message: &str) -> Result<DialogAnswer> {
         Err(e) => warn!("kdialog failed: {}", e),
     }
 
-    // Final fallback
     ask_stdout(title, message)
 }
 
 fn notify_linux(title: &str, message: &str) -> Result<()> {
+    use std::process::Command;
+
     match Command::new("notify-send")
         .args([title, message])
         .output()
@@ -109,64 +497,35 @@ fn notify_linux(title: &str, message: &str) -> Result<()> {
     }
 }
 
-/* ── Windows ───────────────────────────────────────────────────────── */
+fn prompt_linux(title: &str, message: &str) -> Result<PromptResult> {
+    use std::process::Command;
 
-fn ask_windows(title: &str, message: &str) -> Result<DialogAnswer> {
-    let ps = format!(
-        "Add-Type -AssemblyName System.Windows.Forms; \
-         $r = [System.Windows.Forms.MessageBox]::Show('{}', '{}', 'YesNo', 'Question'); \
-         if ($r -eq 'Yes') {{ exit 0 }} else {{ exit 1 }}",
-        escape_ps(message), escape_ps(title)
-    );
-
-    let out = Command::new("powershell")
-        .args(["-Command", &ps])
-        .output()
-        .context("PowerShell MessageBox failed")?;
-
-    if out.status.success() {
-        Ok(DialogAnswer::Yes)
-    } else {
-        Ok(DialogAnswer::No)
-    }
-}
-
-fn notify_windows(title: &str, message: &str) -> Result<()> {
-    // msg * pops a local dialog. Works even without BurntToast.
-    let out = Command::new("msg")
-        .args(["*", "/TIME:5", &format!("{}: {}", title, message)])
+    let out = Command::new("zenity")
+        .args(["--entry", "--title", title, "--text", message])
         .output();
 
     match out {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            warn!("msg command error: {}", stderr);
-            bail!("Windows msg notification failed: {}", stderr)
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if text.is_empty() {
+                Ok(PromptResult { text: None })
+            } else {
+                Ok(PromptResult { text: Some(text) })
+            }
         }
+        Ok(_) => Ok(PromptResult { text: None }),
         Err(e) => {
-            warn!("msg command failed: {}; trying PowerShell fallback", e);
-            let ps = format!(
-                "Add-Type -AssemblyName System.Windows.Forms; \
-                 [System.Windows.Forms.MessageBox]::Show('{}', '{}', 'OK', 'Information')",
-                escape_ps(message), escape_ps(title)
-            );
-            Command::new("powershell")
-                .args(["-Command", &ps])
-                .output()
-                .context("PowerShell fallback for notify failed")?;
-            Ok(())
+            warn!("zenity --entry failed: {}", e);
+            prompt_stdout(title, message)
         }
     }
 }
 
-fn escape_ps(s: &str) -> String {
-    s.replace("'", "''")
-}
-
-/* ── macOS ─────────────────────────────────────────────────────────── */
+// ── macOS ───────────────────────────────────────────────────────────
 
 fn ask_macos(title: &str, message: &str) -> Result<DialogAnswer> {
+    use std::process::Command;
+
     let script = format!(
         "display dialog \"{}\" with title \"{}\" buttons {{\"No\", \"Yes\"}} default button \"Yes\"",
         message.replace('"', "\\\""),
@@ -188,6 +547,8 @@ fn ask_macos(title: &str, message: &str) -> Result<DialogAnswer> {
 }
 
 fn notify_macos(title: &str, message: &str) -> Result<()> {
+    use std::process::Command;
+
     let script = format!(
         "display notification \"{}\" with title \"{}\"",
         message.replace('"', "\\\""),
@@ -203,12 +564,43 @@ fn notify_macos(title: &str, message: &str) -> Result<()> {
     Ok(())
 }
 
-/* ── Fallback ───────────────────────────────────────────────────────── */
+fn prompt_macos(title: &str, message: &str) -> Result<PromptResult> {
+    use std::process::Command;
+
+    let script = format!(
+        "display dialog \"{}\" with title \"{}\" default answer \"\"",
+        message.replace('"', "\\\""),
+        title.replace('"', "\\\""),
+    );
+
+    let out = Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output();
+
+    match out {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if let Some(start) = stdout.find("text returned:") {
+                let text = stdout[start + 15..].trim().trim_matches('"').to_string();
+                if text.is_empty() {
+                    Ok(PromptResult { text: None })
+                } else {
+                    Ok(PromptResult { text: Some(text) })
+                }
+            } else {
+                Ok(PromptResult { text: None })
+            }
+        }
+        _ => Ok(PromptResult { text: None }),
+    }
+}
+
+// ── Fallback (stdout) ──────────────────────────────────────────────────
 
 fn ask_stdout(title: &str, message: &str) -> Result<DialogAnswer> {
     println!("\n=== {} ===", title);
     println!("{}", message);
-    println!("[Y/N]? ");
 
     use std::io::{self, BufRead, Write};
     let stdin = io::stdin();
@@ -220,83 +612,79 @@ fn ask_stdout(title: &str, message: &str) -> Result<DialogAnswer> {
         let _ = stdin.lock().read_line(&mut line);
         match line.trim().to_lowercase().as_str() {
             "y" | "yes" => return Ok(DialogAnswer::Yes),
-            "n" | "no"  => return Ok(DialogAnswer::No),
+            "n" | "no" => return Ok(DialogAnswer::No),
             _ => println!("Please enter Y or N"),
         }
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn test_escape_ps_empty() {
-        assert_eq!(escape_ps(""), "");
+fn prompt_stdout(title: &str, message: &str) -> Result<PromptResult> {
+    println!("\n=== {} ===", title);
+    println!("{}", message);
+
+    use std::io::{self, BufRead, Write};
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    print!("Answer: ");
+    let _ = stdout.flush();
+    let mut line = String::new();
+    let _ = stdin.lock().read_line(&mut line);
+    let text = line.trim().to_string();
+    if text.is_empty() {
+        Ok(PromptResult { text: None })
+    } else {
+        Ok(PromptResult { text: Some(text) })
+    }
+}
+
+// ── CLI helper entry point ───────────────────────────────────────────
+
+pub fn run_dialog_helper(dialog_type: &str, title: &str, message: &str) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::Console::FreeConsole;
+        unsafe {
+            let _ = FreeConsole();
+        }
     }
 
-    #[test]
-    fn test_escape_ps_no_quotes() {
-        assert_eq!(
-            escape_ps("Hello World"),
-            "Hello World"
-        );
-    }
-
-    #[test]
-    fn test_escape_ps_single_quote() {
-        assert_eq!(
-            escape_ps("It's working"),
-            "It''s working"
-        );
-    }
-
-    #[test]
-    fn test_escape_ps_multiple_quotes() {
-        assert_eq!(
-            escape_ps("Don't 'stop' me now"),
-            "Don''t ''stop'' me now"
-        );
-    }
-
-    #[test]
-    fn test_dialog_answer_yes() {
-        let ans = DialogAnswer::Yes;
-        assert!(matches!(ans, DialogAnswer::Yes));
-    }
-
-    #[test]
-    fn test_dialog_answer_no() {
-        let ans = DialogAnswer::No;
-        assert!(matches!(ans, DialogAnswer::No));
-    }
-
-    #[test]
-    fn test_dialog_answer_clone() {
-        let a = DialogAnswer::Yes;
-        let b = a.clone();
-        assert!(matches!(b, DialogAnswer::Yes));
-    }
-
-    #[test]
-    fn test_escape_ps_special_chars() {
-        assert_eq!(
-            escape_ps("Device 'AINMS' Agent"),
-            "Device ''AINMS'' Agent"
-        );
-    }
-
-    #[test]
-    fn test_escape_ps_long_string() {
-        let input = "Lorem 'ipsum' dolor 'sit' amet";
-        let expected = "Lorem ''ipsum'' dolor ''sit'' amet";
-        assert_eq!(escape_ps(input), expected);
-    }
-
-    #[test]
-    fn test_dialog_answer_debug() {
-        let yes = DialogAnswer::Yes;
-        let no = DialogAnswer::No;
-        assert!(format!("{:?}", yes).contains("Yes"));
-        assert!(format!("{:?}", no).contains("No"));
+    match dialog_type {
+        "notify" => {
+            #[cfg(target_os = "windows")]
+            notify_windows_direct(title, message)?;
+            Ok(())
+        }
+        "ask" => {
+            #[cfg(target_os = "windows")]
+            {
+                let answer = ask_windows_direct(title, message)?;
+                let result = match answer {
+                    DialogAnswer::Yes => "yes",
+                    DialogAnswer::No => "no",
+                };
+                std::fs::write(dialog_result_path(), result)?;
+            }
+            Ok(())
+        }
+        "prompt" => {
+            #[cfg(target_os = "windows")]
+            {
+                let result = prompt_windows_direct(title, message)?;
+                match result.text {
+                    Some(text) => std::fs::write(dialog_result_path(), text)?,
+                    None => std::fs::write(dialog_result_path(), "")?,
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let result = prompt_stdout(title, message)?;
+                match result.text {
+                    Some(text) => std::fs::write(dialog_result_path(), text)?,
+                    None => std::fs::write(dialog_result_path(), "")?,
+                }
+            }
+            Ok(())
+        }
+        other => bail!("Unknown dialog type: {}", other),
     }
 }

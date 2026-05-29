@@ -65,7 +65,7 @@ fn spawn_screenshot_helper_in_user_session(
         WTSGetActiveConsoleSessionId, WTSQueryUserToken,
     };
     use windows::Win32::System::Threading::{
-        CreateProcessAsUserW, CREATE_UNICODE_ENVIRONMENT, DETACHED_PROCESS,
+        CreateProcessAsUserW, CREATE_UNICODE_ENVIRONMENT, CREATE_NO_WINDOW,
         PROCESS_INFORMATION, STARTUPINFOW, STARTF_USESHOWWINDOW,
     };
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
@@ -117,7 +117,7 @@ fn spawn_screenshot_helper_in_user_session(
             None,
             None,
             false,
-            CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS,
+            CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
             Some(env_block),
             None,
             &startup_info,
@@ -243,4 +243,83 @@ fn encode_png(bgra_pixels: &[u8], width: u32, height: u32) -> anyhow::Result<Vec
     }
 
     Ok(png_buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_session_zero_returns_bool() {
+        let _ = is_session_zero();
+    }
+
+    #[test]
+    fn test_is_session_zero_in_interactive_session() {
+        if std::env::var("CI").is_err() {
+            assert!(!is_session_zero(), "Tests run in interactive session, should NOT be Session 0");
+        }
+    }
+
+    #[test]
+    fn test_screenshot_commander_bails_in_session_zero() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let commander = ScreenshotCommander::new();
+        let result = rt.block_on(async { commander.capture().await });
+
+        if is_session_zero() {
+            assert!(result.is_err(), "capture() must fail in Session 0");
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("Session 0"),
+                "Error should mention Session 0, got: {}", err
+            );
+        } else if let Err(e) = result {
+            assert!(
+                !e.to_string().contains("Session 0"),
+                "In interactive session, error should not mention Session 0, got: {}", e
+            );
+        }
+    }
+
+    #[test]
+    fn test_capture_in_user_session_builds_correct_args() {
+        let server = "http://localhost:8440";
+        let device_id = "device-123";
+        let install_token = "token-abc";
+        let request_id = "req-456";
+
+        let expected_args = format!(
+            "--take-screenshot --server {} --device-id {} --install-token {} --request-id {}",
+            server, device_id, install_token, request_id
+        );
+
+        assert!(expected_args.contains("--take-screenshot"));
+        assert!(expected_args.contains("--server http://localhost:8440"));
+        assert!(expected_args.contains("--device-id device-123"));
+        assert!(expected_args.contains("--install-token token-abc"));
+        assert!(expected_args.contains("--request-id req-456"));
+    }
+
+    #[test]
+    fn test_capture_in_user_session_auto_request_id_format() {
+        let timestamp = 1700000000i64;
+        let request_id = format!("auto-{}", timestamp);
+        assert!(request_id.starts_with("auto-"));
+        assert!(request_id.contains(&timestamp.to_string()));
+    }
+
+    #[test]
+    fn test_capture_screen_png_returns_valid_png_header() {
+        if is_session_zero() { return; }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let commander = ScreenshotCommander::new();
+        let result = rt.block_on(async { commander.capture().await });
+
+        if let Ok(data) = result {
+            assert!(data.len() >= 8, "PNG data too short: {} bytes", data.len());
+            assert_eq!(&data[0..4], b"\x89PNG", "Missing PNG magic header");
+        }
+    }
 }

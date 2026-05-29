@@ -7,7 +7,8 @@ use agent_collectors::{
     build_cpu_cache, get_running_applications_with_cpu_cache,
 };
 use agent_screenshot::ScreenshotCommander;
-use std::time:: Duration;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 
 #[path = "../os.rs"]
 mod os;

@@ -321,6 +321,40 @@ type InstallTokenClaims struct {
 	Role       string
 }
 
+// ── LLM Models ────────────────────────────────────────────────────────────
+
+// LLMModelFile describes a single downloadable model file (e.g. a GGUF file).
+type LLMModelFile struct {
+	Filename    string `json:"filename"`
+	DownloadURL string `json:"download_url"`
+	FileSizeMB  int64  `json:"file_size_mb"`
+	SHA256      string `json:"sha256,omitempty"`
+}
+
+// LLMModelParameters holds the llama.cpp inference parameters the agent
+// should use when loading this model.
+type LLMModelParameters struct {
+	NCtx       uint32 `json:"n_ctx"`
+	NThreads   uint32 `json:"n_threads"`
+	NGpuLayers uint32 `json:"n_gpu_layers"`
+}
+
+// LLMModel is the top-level representation of an LLM the agent can download.
+type LLMModel struct {
+	ID          string             `json:"id"`
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	Provider    string             `json:"provider"`
+	Version     string             `json:"version"`
+	Files       []LLMModelFile    `json:"files"`
+	Parameters  LLMModelParameters `json:"parameters"`
+}
+
+// LLMModelsResponse is the JSON envelope returned by the /v1/models endpoint.
+type LLMModelsResponse struct {
+	Models []LLMModel `json:"models"`
+}
+
 // JSONMap is a helper type for JSONB columns.
 type JSONMap map[string]interface{}
 

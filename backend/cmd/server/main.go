@@ -165,7 +165,8 @@ func main() {
 			r.Get("/devices/pending", handler.ListPendingDevices(enrollmentSvc))
 
 			r.Get("/rules/sync", handler.SyncRules(appClassificationRepo, alertRuleRepo, policyRepo, deviceRepo, employeeRepo, companyRepo))
-			r.Get("/models/latest", handler.GetLatestModel(nil))
+
+			r.Get("/models", handler.GetLLMModels())
 
 			r.Post("/events/bulk", handler.BulkEvents(eventRepo))
 			r.Post("/events/priority", handler.PriorityEvent(eventRepo))

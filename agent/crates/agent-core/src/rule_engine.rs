@@ -19,6 +19,7 @@ pub struct RuleResult {
     pub category: String,
     pub confidence: f64,
     pub enforcement: EnforcementAction,
+    #[allow(dead_code)]
     pub matched_rule: Option<String>,
 }
 
@@ -27,8 +28,10 @@ pub struct RuleResult {
 #[derive(Debug, Clone)]
 pub struct ActivityInfo {
     pub app_name: String,
+    #[allow(dead_code)]
     pub window_title: String,
     pub process_name: String,
+    #[allow(dead_code)]
     pub url: Option<String>,
     pub duration_sec: f64,
 }
@@ -57,6 +60,7 @@ impl RuleEngine {
         self.rules = Some(rules);
     }
 
+    #[allow(dead_code)]
     pub fn has_rules(&self) -> bool {
         self.rules.is_some()
     }
@@ -195,6 +199,7 @@ impl RuleEngine {
     }
 
     /// Reset duration trackers (e.g., on new reporting period)
+    #[allow(dead_code)]
     pub fn reset_durations(&mut self) {
         self.category_durations.clear();
     }

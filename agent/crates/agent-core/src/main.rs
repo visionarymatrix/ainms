@@ -23,6 +23,7 @@ use agent_proto::events::{
     TokenEnrollRequest,
 };
 use agent_comms::socket::{self, SocketCommand};
+use agent_store::Store;
 
 use config::{default_config_path, load_state, save_state, AgentStateFile, AgentStateSection};
 use rule_engine::{EnforcementAction, RuleEngine};
@@ -73,6 +74,21 @@ struct Args {
 
     #[arg(long, hide = true)]
     take_screenshot: bool,
+
+    #[arg(long, hide = true)]
+    dialog_notify: bool,
+
+    #[arg(long, hide = true)]
+    dialog_ask: bool,
+
+    #[arg(long, hide = true)]
+    dialog_prompt: bool,
+
+    #[arg(long, hide = true)]
+    dialog_title: Option<String>,
+
+    #[arg(long, hide = true)]
+    dialog_message: Option<String>,
 
     #[arg(long)]
     device_id: Option<String>,
@@ -166,10 +182,16 @@ struct AgentState {
     screenshot_enabled: bool,
     screenshot_interval_secs: u64,
     rule_engine: RuleEngine,
+    store: Store,
 }
 
 impl AgentState {
     fn push_events(&mut self, new_events: Vec<AppUsageEventMeta>) {
+        // Persist to SQLite immediately for durability
+        if let Err(e) = self.store.insert_events(&new_events) {
+            warn!("Failed to persist events to store: {}", e);
+        }
+
         let overflow = self.events.len() + new_events.len();
         if overflow > MAX_EVENT_BUFFER {
             let to_drop = overflow.saturating_sub(MAX_EVENT_BUFFER);
@@ -501,7 +523,6 @@ async fn collect_loop(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut tick = interval(Duration::from_secs(10));
-    let mut cpu_cache: Option<HashMap<i32, (u64, u64)>> = None;
 
     loop {
         tokio::select! {
@@ -583,7 +604,6 @@ async fn collect_loop(
         }
 
         let procs = agent_collectors::get_running_applications();
-        cpu_cache = None;
 
         let mut process_events = Vec::new();
         for proc_info in &procs {
@@ -789,6 +809,12 @@ async fn screenshot_loop(
             }
         }
 
+        #[cfg(target_os = "windows")]
+        if agent_screenshot::is_session_zero() {
+            info!("Skipping periodic screenshot: running in Session 0 (service context)");
+            continue;
+        }
+
         let idle_secs = agent_collectors::get_idle_seconds();
         if idle_secs >= IDLE_THRESHOLD_SECS {
             info!(idle_secs, "Skipping screenshot: user idle");
@@ -846,6 +872,21 @@ async fn screenshot_interval_loop(
                 }
 
                 info!("Auto-capturing screenshot (interval: {}s)", interval_secs);
+
+                // In Session 0 (service context), we cannot capture the screen directly.
+                // Spawn a helper process in the user's interactive session; it will
+                // capture the screenshot and upload it to the server itself.
+                #[cfg(target_os = "windows")]
+                if agent_screenshot::is_session_zero() {
+                    let request_id = format!("auto-{}", chrono::Utc::now().timestamp());
+                    match agent_screenshot::ScreenshotCommander::capture_in_user_session(
+                        &server, &device_id, &install_token, &request_id,
+                    ) {
+                        Ok(()) => info!("Auto screenshot helper spawned in user session"),
+                        Err(e) => warn!("Failed to spawn auto screenshot helper: {}", e),
+                    }
+                    continue;
+                }
 
                 let commander = agent_screenshot::ScreenshotCommander::new();
                 match commander.capture().await {
@@ -1033,7 +1074,7 @@ async fn upload_events(
 }
 
 enum UploadError {
-    Failed(String),
+    Failed,
 }
 
 async fn send_bulk_event(
@@ -1057,13 +1098,13 @@ async fn send_bulk_event(
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
                 warn!(status = status.as_u16(), %body, "Upload server error");
-                Err(UploadError::Failed(format!("status {}", status)))
+                Err(UploadError::Failed)
             }
         }
         Err(e) => {
             warn!("Upload network error: {}", e);
             sleep(Duration::from_secs(UPLOAD_RETRY_DELAY_SECS)).await;
-            Err(UploadError::Failed(e.to_string()))
+            Err(UploadError::Failed)
         }
     }
 }
@@ -1071,7 +1112,7 @@ async fn send_bulk_event(
 async fn upload_network_connections(
     client: &reqwest::Client,
     server: &str,
-    state: &Arc<Mutex<AgentState>>,
+    _state: &Arc<Mutex<AgentState>>,
     device_id: &str,
     install_token: &str,
     connections: Vec<NetworkConnection>,
@@ -1505,6 +1546,11 @@ fn main() -> Result<()> {
         return run_take_screenshot(&args);
     }
 
+    // Dialog helper mode: spawned by CreateProcessAsUserW from Session 0
+    if args.dialog_notify || args.dialog_ask || args.dialog_prompt {
+        return run_dialog_helper_cmd(&args);
+    }
+
     if let Some(ref cmd) = args.service {
         match cmd {
             ServiceCommand::Install { install_token, server } => {
@@ -1543,6 +1589,14 @@ fn main() -> Result<()> {
 }
 
 fn run_take_screenshot(args: &Args) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::Console::FreeConsole;
+        unsafe {
+            let _ = FreeConsole();
+        }
+    }
+
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         tracing_subscriber::fmt()
@@ -1594,6 +1648,31 @@ fn run_take_screenshot(args: &Args) -> Result<()> {
     })
 }
 
+fn run_dialog_helper_cmd(args: &Args) -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    let dialog_type = if args.dialog_notify {
+        "notify"
+    } else if args.dialog_ask {
+        "ask"
+    } else if args.dialog_prompt {
+        "prompt"
+    } else {
+        anyhow::bail!("No dialog type flag specified");
+    };
+
+    let title = args.dialog_title.as_deref().unwrap_or("AINMS Agent");
+    let message = args.dialog_message.as_deref().unwrap_or("");
+
+    info!(dialog_type, title, "Dialog helper started in user session");
+
+    dialog::run_dialog_helper(dialog_type, title, message)?;
+
+    Ok(())
+}
+
 async fn run_agent() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
@@ -1604,11 +1683,18 @@ async fn run_agent() -> Result<()> {
     let args = Args::parse();
     let cfg = resolve_config(&args);
 
+    let db_path = agent_store::default_db_path();
+    let store = Store::open(std::path::Path::new(&db_path))
+        .unwrap_or_else(|e| {
+            warn!("Failed to open database: {}, continuing with fallback", e);
+            Store::new()
+        });
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
 
-    let (device_id, device_token, install_token, rules) = match try_resume_or_enroll(&client, &cfg).await {
+    let (device_id, device_token, install_token, rules) = match try_resume_or_enroll(&client, &cfg, &store).await {
         Ok(result) => result,
         Err(e) => {
             anyhow::bail!("Failed to establish agent identity: {}. Run: ainms-agent --install-token <TOKEN> --server <URL>", e);
@@ -1647,6 +1733,7 @@ async fn run_agent() -> Result<()> {
             }
             re
         },
+        store,
     }));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -1839,6 +1926,7 @@ async fn run_agent() -> Result<()> {
 async fn try_resume_or_enroll(
     client: &reqwest::Client,
     cfg: &ResolvedConfig,
+    store: &Store,
 ) -> Result<(String, String, String, Option<agent_proto::events::RulesInfo>)> {
     // Step 1: Try to resume from saved state
     if let Some(saved) = load_state(&cfg.config_path) {
@@ -1848,6 +1936,9 @@ async fn try_resume_or_enroll(
             match try_heartbeat(client, &cfg.server, &a.device_id, &a.install_token).await {
                 Ok(()) => {
                     info!("Resumed with saved device identity (heartbeat OK)");
+                    if let Err(e) = store.save_agent_state(&cfg.server, &a.install_token, &a.device_id, &a.device_token) {
+                        warn!("Failed to persist resumed state to database: {}", e);
+                    }
                     return Ok((a.device_id.clone(), a.device_token.clone(), a.install_token.clone(), None));
                 }
                 Err(e) => {
@@ -1879,6 +1970,10 @@ async fn try_resume_or_enroll(
             };
             if let Err(e) = save_state(&cfg.config_path, &state_file) {
                 warn!("Failed to save state after enrollment: {}", e);
+            }
+
+            if let Err(e) = store.save_agent_state(&cfg.server, install_token, &enroll_resp.device_id, &enroll_resp.device_token) {
+                warn!("Failed to save agent state to database: {}", e);
             }
 
             let rules = enroll_resp.rules.clone();
