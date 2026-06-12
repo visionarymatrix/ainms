@@ -23,6 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Loading model: {} ===", model_path);
     let config = LlamaCppConfig {
         model_path: PathBuf::from(&model_path),
+        mmproj_path: None,
         n_ctx: 2048,
         n_threads: 4,
         n_gpu_layers: 0,

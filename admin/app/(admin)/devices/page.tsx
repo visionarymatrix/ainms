@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -35,7 +36,6 @@ import {
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api/client";
 import { getUser, getToken } from "@/lib/auth/session";
-import { requestScreenshot, getDeviceScreenshots, type ScreenshotRequest } from "@/lib/api/employees";
 import { useSocket } from "@/lib/socket";
 import {
   CheckCircle,
@@ -49,12 +49,12 @@ import {
   Network,
   Wifi,
   AlertCircle,
-  Camera,
-  RefreshCw,
-  X,
-  Eye,
 } from "lucide-react";
 import { toast } from "sonner";
+import { timeAgo, copyToClipboard } from "@/lib/utils/format";
+import { SocketIndicator } from "@/components/shared/socket-indicator";
+import { DeviceStatusBadge } from "@/components/shared/status-badge";
+import { ConnectionStatusBadge } from "@/components/shared/status-badge";
 
 interface Device {
   id: string;
@@ -84,53 +84,10 @@ interface Employee {
   employee_id: string;
 }
 
-function timeAgo(dateStr: string | null): string {
-  if (!dateStr) return "Never";
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMin = Math.floor(diffMs / 60000);
-  if (diffMin < 1) return "just now";
-  if (diffMin < 60) return `${diffMin} min ago`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDay = Math.floor(diffHr / 24);
-  return `${diffDay}d ago`;
-}
-
 function truncateFingerprint(fp: string | null): string {
   if (!fp) return "—";
   if (fp.length <= 20) return fp;
   return `${fp.slice(0, 12)}...${fp.slice(-8)}`;
-}
-
-function getConnectionStatus(device: Device): { label: string; variant: "default" | "outline" | "secondary" | "destructive" } {
-  if (device.connection_status) {
-    switch (device.connection_status) {
-      case "online": return { label: "online", variant: "default" };
-      case "idle": return { label: "idle", variant: "secondary" };
-      case "offline": return { label: "offline", variant: "destructive" };
-    }
-  }
-  return { label: "unknown", variant: "secondary" };
-}
-
-function getStatusBadge(status: string): { label: string; className: string } {
-  switch (status) {
-    case "pending":
-      return { label: "Pending", className: "bg-amber-100 text-amber-800 hover:bg-amber-100 border-amber-200" };
-    case "active":
-      return { label: "Active", className: "bg-emerald-100 text-emerald-800 hover:bg-emerald-100 border-emerald-200" };
-    case "rejected":
-      return { label: "Rejected", className: "bg-red-100 text-red-800 hover:bg-red-100 border-red-200" };
-    default:
-      return { label: status, className: "" };
-  }
-}
-
-function copyToClipboard(text: string, label: string) {
-  navigator.clipboard.writeText(text);
-  toast.success(`${label} copied to clipboard`);
 }
 
 export default function DevicesPage() {
@@ -142,14 +99,9 @@ export default function DevicesPage() {
   const [error, setError] = useState<string | null>(null);
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
-  const [screenshotLoading, setScreenshotLoading] = useState<Record<string, boolean>>({});
-  const [pendingScreenshots, setPendingScreenshots] = useState<Record<string, string>>({});
-  const [completedScreenshots, setCompletedScreenshots] = useState<Record<string, ScreenshotRequest>>({});
-  const [viewingScreenshot, setViewingScreenshot] = useState<ScreenshotRequest | null>(null);
   const [rejectDialogOpen, setRejectDialogOpen] = useState(false);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const user = getUser();
-
   const token = getToken();
   const { isConnected, on } = useSocket(token);
 
@@ -182,9 +134,7 @@ export default function DevicesPage() {
 
   const fetchPendingDevices = useCallback(async () => {
     try {
-      console.log("Fetching pending devices...");
       const data = await api.get<Device[]>("/v1/devices/pending");
-      console.log("Pending devices response:", data);
       setPendingDevices(data || []);
     } catch (err) {
       console.error("Failed to fetch pending devices:", err);
@@ -229,34 +179,9 @@ export default function DevicesPage() {
         )
       );
     });
-    const offScreenshotReady = on(
-      "screenshot_ready",
-      (data: { request_id: string; device_id: string; status: string; image_path: string }) => {
-        const completed: ScreenshotRequest = {
-          id: data.request_id,
-          device_id: data.device_id,
-          requested_by: "",
-          reason: "",
-          policy: "",
-          status: data.status,
-          image_path: data.image_path,
-          created_at: new Date().toISOString(),
-          completed_at: new Date().toISOString(),
-        };
-        setCompletedScreenshots((prev) => ({ ...prev, [data.device_id]: completed }));
-        setPendingScreenshots((prev) => {
-          const next = { ...prev };
-          delete next[data.device_id];
-          return next;
-        });
-        setScreenshotLoading((prev) => ({ ...prev, [data.device_id]: false }));
-        toast.success("Screenshot captured and uploaded!");
-      }
-    );
     return () => {
       offOnline();
       offOffline();
-      offScreenshotReady();
     };
   }, [on]);
 
@@ -295,71 +220,6 @@ export default function DevicesPage() {
     setRejectDialogOpen(true);
   }
 
-  const pendingRequestIds = useRef<Record<string, string>>({});
-
-  async function handleTakeScreenshot(deviceId: string) {
-    setScreenshotLoading((prev) => ({ ...prev, [deviceId]: true }));
-    setPendingScreenshots((prev) => ({ ...prev, [deviceId]: "requested" }));
-    try {
-      const req = await requestScreenshot(deviceId);
-      const requestId = req.id;
-      pendingRequestIds.current[deviceId] = requestId;
-      setPendingScreenshots((prev) => ({ ...prev, [deviceId]: "capturing" }));
-      toast.info("Screenshot requested — waiting for agent to capture...");
-
-      await new Promise<void>((resolve) => {
-        const timeout = setTimeout(async () => {
-          try {
-            const screenshots = await getDeviceScreenshots(deviceId);
-            const completed = screenshots.find(
-              (s) => s.id === requestId && s.status === "completed" && s.image_path
-            );
-            if (completed) {
-              setCompletedScreenshots((prev) => ({ ...prev, [deviceId]: completed }));
-              setPendingScreenshots((prev) => {
-                const next = { ...prev };
-                delete next[deviceId];
-                return next;
-              });
-              toast.success("Screenshot captured and uploaded!");
-            } else {
-              setPendingScreenshots((prev) => ({ ...prev, [deviceId]: "timeout" }));
-              toast.warning("Screenshot request sent, but agent hasn't responded yet. Check back later.");
-            }
-          } catch {
-            setPendingScreenshots((prev) => ({ ...prev, [deviceId]: "timeout" }));
-            toast.warning("Screenshot request sent, but agent hasn't responded yet. Check back later.");
-          }
-          resolve();
-        }, 60000);
-
-
-        const checkSocket = setInterval(() => {
-          if (!pendingRequestIds.current[deviceId]) {
-            clearTimeout(timeout);
-            clearInterval(checkSocket);
-            resolve();
-          }
-        }, 500);
-      });
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to request screenshot");
-      setPendingScreenshots((prev) => {
-        const next = { ...prev };
-        delete next[deviceId];
-        return next;
-      });
-    } finally {
-      delete pendingRequestIds.current[deviceId];
-      setScreenshotLoading((prev) => ({ ...prev, [deviceId]: false }));
-    }
-  }
-
-  function getScreenshotImageUrl(requestId: string): string {
-    const t = typeof window !== "undefined" ? localStorage.getItem("token") || "" : "";
-    return `/api/screenshots/${requestId}?token=${encodeURIComponent(t)}`;
-  }
-
   function toggleRow(deviceId: string) {
     setExpandedRows((prev) => {
       const newSet = new Set(prev);
@@ -373,9 +233,13 @@ export default function DevicesPage() {
   }
 
   const onlineCount = devices.filter((d) => d.connection_status === "online").length;
-
   const activeCount = devices.filter((d) => d.status === "active").length;
   const pendingCount = devices.filter((d) => d.status === "pending").length;
+
+  function employeeName(device: Device): string {
+    const emp = employees[device.employee_id];
+    return emp ? `${emp.first_name} ${emp.last_name}` : device.employee_id.slice(0, 8) + "...";
+  }
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -387,16 +251,7 @@ export default function DevicesPage() {
               Monitor and manage enrolled devices across your organization.
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <span className={`relative inline-flex h-2 w-2 rounded-full ${isConnected ? "bg-emerald-500" : "bg-red-500"}`}>
-                {isConnected && (
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-40" />
-                )}
-              </span>
-              {isConnected ? "Socket connected" : "Socket disconnected"}
-            </div>
-          </div>
+          <SocketIndicator isConnected={isConnected} />
         </div>
 
         <div className="grid gap-4 md:grid-cols-4">
@@ -509,7 +364,7 @@ export default function DevicesPage() {
               ) : (
                 <div className="space-y-4">
                   {pendingDevices.map((device) => {
-                    const employee = employees[device.employee_id];
+                    const emp = employees[device.employee_id];
                     return (
                       <Card key={device.id} className="bg-white">
                         <CardContent className="p-4">
@@ -523,14 +378,18 @@ export default function DevicesPage() {
                                   Pending
                                 </Badge>
                               </div>
-                              
+
                               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                                 <div>
                                   <span className="text-muted-foreground">Employee:</span>
                                   <p className="font-medium">
-                                    {employee
-                                      ? `${employee.first_name} ${employee.last_name}`
-                                      : device.employee_id.slice(0, 8)}...
+                                    {emp ? (
+                                      <Link href={`/employees/${device.employee_id}`} className="text-blue-600 hover:underline">
+                                        {emp.first_name} {emp.last_name}
+                                      </Link>
+                                    ) : (
+                                      device.employee_id.slice(0, 8) + "..."
+                                    )}
                                   </p>
                                 </div>
                                 <div>
@@ -682,14 +541,10 @@ export default function DevicesPage() {
                     <TableHead>Connection</TableHead>
                     <TableHead>Last Seen</TableHead>
                     <TableHead>Enrolled</TableHead>
-                    <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {devices.map((device) => {
-                    const connectionStatus = getConnectionStatus(device);
-                    const statusBadge = getStatusBadge(device.status);
-                    const employee = employees[device.employee_id];
                     const isExpanded = expandedRows.has(device.id);
 
                     return (
@@ -712,9 +567,13 @@ export default function DevicesPage() {
                             {device.hostname || "unknown"}
                           </TableCell>
                           <TableCell>
-                            {employee
-                              ? `${employee.first_name} ${employee.last_name}`
-                              : device.employee_id.slice(0, 8)}...
+                            <Link
+                              href={`/employees/${device.employee_id}`}
+                              className="text-blue-600 hover:underline"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              {employeeName(device)}
+                            </Link>
                           </TableCell>
                           <TableCell>
                             <Tooltip>
@@ -759,52 +618,25 @@ export default function DevicesPage() {
                             </div>
                           </TableCell>
                           <TableCell>
-                            <Badge variant="outline" className={statusBadge.className}>
-                              {statusBadge.label}
-                            </Badge>
+                            <DeviceStatusBadge status={device.status} />
                           </TableCell>
                           <TableCell>
-                            <Badge variant={connectionStatus.variant}>
-                              {connectionStatus.label}
-                            </Badge>
+                            <ConnectionStatusBadge status={device.connection_status ?? "offline"} />
                           </TableCell>
                           <TableCell>{timeAgo(device.last_heartbeat)}</TableCell>
                           <TableCell>{timeAgo(device.enrolled_at)}</TableCell>
-                          <TableCell className="text-right">
-                            {device.connection_status === "online" || device.connection_status === "idle" ? (
-                              <div className="flex items-center justify-end gap-1">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-7 text-xs gap-1"
-                                  disabled={screenshotLoading[device.id]}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleTakeScreenshot(device.id);
-                                  }}
-                                >
-                                  {screenshotLoading[device.id] ? (
-                                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                                  ) : (
-                                    <Camera className="h-3.5 w-3.5" />
-                                  )}
-                                  {pendingScreenshots[device.id] === "capturing" ? "Capturing..." : "Screenshot"}
-                                </Button>
-                              </div>
-                            ) : null}
-                          </TableCell>
                         </TableRow>
                         {isExpanded && (
                           <TableRow className="bg-muted/30">
                             <TableCell colSpan={10} className="p-4">
                               <div className="space-y-4">
                                 <h4 className="font-semibold text-sm">System Information</h4>
-                                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 text-sm">
+                                <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
                                   {device.fingerprint && (
-                                    <div className="col-span-2 lg:col-span-2">
+                                    <div className="col-span-2 md:col-span-3">
                                       <span className="text-muted-foreground block mb-1">Fingerprint</span>
                                       <div className="flex items-center gap-2">
-                                        <code className="bg-background px-2 py-1 rounded text-xs font-mono break-all flex-1">
+                                        <code className="bg-background px-2 py-1 rounded text-xs font-mono break-all flex-1 min-w-0">
                                           {device.fingerprint}
                                         </code>
                                         <Button
@@ -819,16 +651,16 @@ export default function DevicesPage() {
                                     </div>
                                   )}
                                   {device.cpu_info && (
-                                    <div className="col-span-2 md:col-span-1">
+                                    <div className="col-span-2 md:col-span-1 min-w-0">
                                       <span className="text-muted-foreground block mb-1">CPU</span>
                                       <div className="flex items-start gap-2">
                                         <Cpu className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
-                                        <span className="break-words text-sm">{device.cpu_info}</span>
+                                        <span className="break-words text-sm min-w-0">{device.cpu_info}</span>
                                       </div>
                                     </div>
                                   )}
                                   {device.ram_info && (
-                                    <div>
+                                    <div className="min-w-0">
                                       <span className="text-muted-foreground block mb-1">RAM</span>
                                       <div className="flex items-center gap-2">
                                         <MemoryStick className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -837,7 +669,7 @@ export default function DevicesPage() {
                                     </div>
                                   )}
                                   {device.disk_info && (
-                                    <div>
+                                    <div className="min-w-0">
                                       <span className="text-muted-foreground block mb-1">Disk</span>
                                       <div className="flex items-center gap-2">
                                         <HardDrive className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -891,55 +723,6 @@ export default function DevicesPage() {
                                     </div>
                                   )}
                                 </div>
-
-
-                                {(completedScreenshots[device.id] || pendingScreenshots[device.id]) && (
-                                  <div className="mt-4 pt-4 border-t">
-                                    <h4 className="font-semibold text-sm flex items-center gap-2 mb-2">
-                                      <Camera className="h-4 w-4 text-muted-foreground" />
-                                      Screenshot
-                                    </h4>
-                                    {completedScreenshots[device.id] ? (
-                                      <div className="relative group rounded-lg overflow-hidden border bg-card w-fit">
-                                        <img
-                                          src={getScreenshotImageUrl(completedScreenshots[device.id].id)}
-                                          alt="Device screenshot"
-                                          className="max-h-48 object-cover cursor-pointer hover:opacity-90 transition-opacity"
-                                          onClick={() => setViewingScreenshot(completedScreenshots[device.id])}
-                                        />
-                                        <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                          <Button
-                                            variant="secondary"
-                                            size="icon"
-                                            className="h-7 w-7"
-                                            onClick={() => setViewingScreenshot(completedScreenshots[device.id])}
-                                          >
-                                            <Eye className="h-3.5 w-3.5" />
-                                          </Button>
-                                        </div>
-                                        <div className="absolute bottom-0 inset-x-0 bg-black/60 px-2 py-1">
-                                          <p className="text-white text-[10px]">
-                                            {new Date(completedScreenshots[device.id].created_at).toLocaleString()}
-                                          </p>
-                                        </div>
-                                      </div>
-                                    ) : pendingScreenshots[device.id] === "timeout" ? (
-                                      <div className="flex items-center gap-2 text-muted-foreground text-sm py-2">
-                                        <AlertCircle className="h-4 w-4" />
-                                        <span>Agent did not respond. Try again later.</span>
-                                      </div>
-                                    ) : (
-                                      <div className="flex items-center gap-2 text-muted-foreground text-sm py-2">
-                                        <RefreshCw className="h-4 w-4 animate-spin" />
-                                        <span>
-                                          {pendingScreenshots[device.id] === "capturing"
-                                            ? "Agent is capturing screenshot..."
-                                            : "Requesting screenshot..."}
-                                        </span>
-                                      </div>
-                                    )}
-                                  </div>
-                                )}
                               </div>
                             </TableCell>
                           </TableRow>
@@ -973,26 +756,6 @@ export default function DevicesPage() {
                 {selectedDeviceId && actionLoading[selectedDeviceId] ? "Rejecting..." : "Reject"}
               </Button>
             </DialogFooter>
-          </DialogContent>
-        </Dialog>
-
-        <Dialog open={!!viewingScreenshot} onOpenChange={(open) => { if (!open) setViewingScreenshot(null); }}>
-          <DialogContent className="max-w-4xl p-0 gap-0 overflow-hidden">
-            <DialogHeader className="px-6 pt-6 pb-2">
-              <DialogTitle>Screenshot</DialogTitle>
-              <DialogDescription>
-                {viewingScreenshot ? new Date(viewingScreenshot.created_at).toLocaleString() : ""}
-              </DialogDescription>
-            </DialogHeader>
-            <div className="px-6 pb-6">
-              {viewingScreenshot && (
-                <img
-                  src={getScreenshotImageUrl(viewingScreenshot.id)}
-                  alt="Device screenshot"
-                  className="w-full rounded-lg"
-                />
-              )}
-            </div>
           </DialogContent>
         </Dialog>
       </div>

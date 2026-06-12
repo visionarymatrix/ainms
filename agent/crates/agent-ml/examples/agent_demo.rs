@@ -22,15 +22,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "llama-cpp")]
     let provider: Arc<dyn LlmProvider> = {
         let config = LlamaCppConfig {
-            model_path: std::path::PathBuf::from(&model_path),
+            model_path: std::path::PathBuf::from(&_model_path),
+            mmproj_path: _mmproj_path.as_ref().map(std::path::PathBuf::from),
             n_ctx: 4096,
             n_threads: 8,
             n_gpu_layers: 99,
         };
         let provider = LlamaCppProvider::new(config);
-        provider.load_model(&model_path).await?;
+        provider.load_model(&_model_path).await?;
 
-        if let Some(ref mmproj) = mmproj_path {
+        if let Some(ref mmproj) = _mmproj_path {
             provider.load_mmproj(mmproj).await?;
         }
 

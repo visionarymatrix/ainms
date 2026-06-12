@@ -55,7 +55,7 @@ func (s *EnrollmentService) buildRules(ctx context.Context, employee *domain.Emp
 			ID:                uuid.New(),
 			TenantID:          employee.CompanyID,
 			UploadInterval:    300,
-			ScreenshotEnabled: false,
+			ScreenshotEnabled: true,
 			ScreenshotPolicy:  "metadata_only",
 		},
 	}
@@ -204,7 +204,7 @@ func (s *EnrollmentService) Enroll(ctx context.Context, req domain.EnrollmentReq
 	return response, nil
 }
 
-func (s *EnrollmentService) Heartbeat(ctx context.Context, deviceIDStr string, agentVersion string) error {
+func (s *EnrollmentService) Heartbeat(ctx context.Context, deviceIDStr string, agentVersion string, systemInfo map[string]interface{}) error {
 	deviceID, err := uuid.Parse(deviceIDStr)
 	if err != nil {
 		return fmt.Errorf("invalid device_id: %w", err)
@@ -229,6 +229,12 @@ func (s *EnrollmentService) Heartbeat(ctx context.Context, deviceIDStr string, a
 	if agentVersion != "" {
 		if err := s.deviceRepo.UpdateAgentVersion(ctx, deviceID, agentVersion); err != nil {
 			log.Printf("warning: failed to update agent_version for device %s: %v", deviceID, err)
+		}
+	}
+
+	if len(systemInfo) > 0 {
+		if err := s.deviceRepo.UpdateHardwareInfo(ctx, deviceID, systemInfo); err != nil {
+			log.Printf("warning: failed to update hardware info for device %s: %v", deviceID, err)
 		}
 	}
 

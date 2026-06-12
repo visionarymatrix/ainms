@@ -126,7 +126,7 @@ func (h *SocketHub) GetOnlineDevices() []string {
 }
 
 func (h *SocketHub) MarkDeviceHeartbeat(ctx context.Context, deviceID string, enrollmentSvc *EnrollmentService) {
-	if err := enrollmentSvc.Heartbeat(ctx, deviceID, ""); err != nil {
+	if err := enrollmentSvc.Heartbeat(ctx, deviceID, "", nil); err != nil {
 		log.Printf("[SocketHub] heartbeat on connect failed: device=%s err=%v", deviceID, err)
 	}
 }

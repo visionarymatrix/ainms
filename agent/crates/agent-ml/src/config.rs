@@ -29,7 +29,7 @@ impl Default for MlConfig {
         Self {
             provider: ProviderType::default(),
             model_path: None,
-            n_ctx: 2048,
+            n_ctx: 8192,
             n_threads: 4,
             n_gpu_layers: 0,
         }
@@ -47,6 +47,9 @@ mod llama_cpp_config {
     pub struct LlamaCppConfig {
         /// Path to the GGUF model file.
         pub model_path: PathBuf,
+        /// Path to the multimodal projector (mmproj) GGUF file.
+        /// If None, the provider will not support vision input.
+        pub mmproj_path: Option<PathBuf>,
         /// Context window size in tokens.
         pub n_ctx: u32,
         /// Number of CPU threads for inference.
@@ -59,7 +62,8 @@ mod llama_cpp_config {
         fn default() -> Self {
             Self {
                 model_path: PathBuf::from("model.gguf"),
-                n_ctx: 2048,
+                mmproj_path: None,
+                n_ctx: 8192,
                 n_threads: 4,
                 n_gpu_layers: 0,
             }

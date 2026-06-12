@@ -100,7 +100,7 @@ pub fn get_active_window() -> Option<ActiveWindow> {
         .unwrap_or_default();
 
     let process_name = std::fs::read_to_string(format!("/proc/{}/comm", pid))
-        .map(|s| s.trim().to_string())
+        .map(|s| crate::active_window::normalize_process_name(s.trim()))
         .unwrap_or_default();
 
     Some(ActiveWindow {

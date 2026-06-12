@@ -1,7 +1,12 @@
+﻿// #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+#![allow(dead_code)]
+
+mod activity_buffer;
 mod config;
 mod dialog;
 pub(crate) mod os;
 mod rule_engine;
+
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -18,15 +23,17 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use agent_proto::events::{
-    AppUsageEventMeta, AppUsageSummary, BulkEventRequest, BulkNetworkEventRequest,
-    EnrollmentResponse, NetworkConnection, NetworkTrafficSummary, PendingCommand,
-    TokenEnrollRequest,
+    AppUsageEntry, AppUsageEventMeta, AppUsageSummary, AppUsageUpdate, BulkEventRequest,
+    BulkNetworkEventRequest, DigitalProfileEntry, EnrollmentResponse, NetworkConnection, NetworkTrafficSummary,
+    PendingCommand, TokenEnrollRequest,
 };
 use agent_comms::socket::{self, SocketCommand};
 use agent_store::Store;
 
+
 use config::{default_config_path, load_state, save_state, AgentStateFile, AgentStateSection};
 use rule_engine::{EnforcementAction, RuleEngine};
+use activity_buffer::ActivityBuffer;
 
 const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_EVENT_BUFFER: usize = 10_000;
@@ -34,9 +41,11 @@ const ENROLL_MAX_RETRIES: u32 = 5;
 const ENROLL_BASE_DELAY_SECS: u64 = 2;
 const CONSECUTIVE_HB_FAILURES_FOR_REENROLL: u32 = 3;
 const UPLOAD_RETRY_DELAY_SECS: u64 = 5;
-const IDLE_THRESHOLD_SECS: f64 = 300.0;
+const IDLE_THRESHOLD_SECS: f64 = 120.0;
 const SCREENSHOT_INTERVAL_SECS: u64 = 300;
 const NETWORK_INTERVAL_SECS: u64 = 60;
+const ACTIVITY_BUFFER_SAMPLE_SECS: u64 = 60;
+const ACTIVITY_SYNC_INTERVAL_SECS: u64 = 1800;
 
 // ── CLI / Config ────────────────────────────────────────────────────────────
 
@@ -84,10 +93,10 @@ struct Args {
     #[arg(long, hide = true)]
     dialog_prompt: bool,
 
-    #[arg(long, hide = true)]
+    #[arg(long)]
     dialog_title: Option<String>,
 
-    #[arg(long, hide = true)]
+    #[arg(long)]
     dialog_message: Option<String>,
 
     #[arg(long)]
@@ -102,6 +111,12 @@ struct Args {
 
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
+    #[serde(default)]
+    agent: Option<ConfigFileAgent>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ConfigFileAgent {
     server: Option<String>,
     install_token: Option<String>,
 }
@@ -121,29 +136,26 @@ fn resolve_config(args: &Args) -> ResolvedConfig {
                 String::new()
             });
             toml::from_str(&contents).unwrap_or_else(|e| {
-                warn!("Failed to parse config file: {}", e);
-                ConfigFile {
-                    server: None,
-                    install_token: None,
-                }
+                warn!("Failed to parse config file {}: {}", path, e);
+                ConfigFile { agent: None }
             })
         }
-        None => ConfigFile {
-            server: None,
-            install_token: None,
-        },
+        None => ConfigFile { agent: None },
     };
+
+    let file_install_token = file_cfg.agent.as_ref().and_then(|a| a.install_token.clone());
+    let file_server = file_cfg.agent.as_ref().and_then(|a| a.server.clone());
 
     let install_token = args
         .install_token
         .clone()
-        .or(file_cfg.install_token)
+        .or(file_install_token)
         .or_else(|| std::env::var("AINMS_INSTALL_TOKEN").ok());
 
     let server = args
         .server
         .clone()
-        .or(file_cfg.server)
+        .or(file_server)
         .or_else(|| std::env::var("AINMS_SERVER").ok())
         .unwrap_or_else(|| "http://localhost:8440".to_string());
 
@@ -183,6 +195,12 @@ struct AgentState {
     screenshot_interval_secs: u64,
     rule_engine: RuleEngine,
     store: Store,
+    activity_buffer: ActivityBuffer,
+    app_durations: HashMap<String, f64>,
+    app_opens: HashMap<String, u64>,
+    app_classifications: HashMap<String, (String, f64)>,
+    digital_profile: Vec<DigitalProfileEntry>,
+    audit_in_progress: bool,
 }
 
 impl AgentState {
@@ -227,6 +245,12 @@ impl AgentState {
         let result = agent_ml::classify_keyword_fallback(&session.process_name);
         let classification = result.category;
         let confidence = result.confidence;
+
+        if agent_collectors::is_desktop_app(&session.process_name) {
+            *self.app_opens.entry(session.app_name.clone()).or_insert(0) += 1;
+            self.app_classifications.entry(session.app_name.clone()).or_insert((classification.clone(), confidence));
+        }
+
         let event = AppUsageEventMeta {
             app_name: session.app_name.clone(),
             window_title: session.window_title.clone(),
@@ -241,6 +265,32 @@ impl AgentState {
             device_id: self.device_id.clone(),
         };
         Some(event)
+    }
+
+    fn accumulate_app_usage(&mut self) -> Vec<AppUsageEntry> {
+        let durations = std::mem::take(&mut self.app_durations);
+        let opens = std::mem::take(&mut self.app_opens);
+        let classifications = std::mem::take(&mut self.app_classifications);
+
+        let mut entries = Vec::new();
+        for (app_name, duration) in &durations {
+            let open_count = opens.get(app_name).copied().unwrap_or(0);
+            let (classification, confidence) = classifications
+                .get(app_name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let r = agent_ml::classify_keyword_fallback(app_name);
+                    (r.category, r.confidence)
+                });
+            entries.push(AppUsageEntry {
+                app_name: app_name.clone(),
+                duration_sec: *duration,
+                open_count,
+                classification,
+                confidence,
+            });
+        }
+        entries
     }
 
     fn persist(&self, server: &str) {
@@ -384,8 +434,31 @@ async fn heartbeat_loop(
             (s.device_id.clone(), s.install_token.clone())
         };
 
+        let hostname = gethostname::gethostname()
+            .into_string()
+            .unwrap_or_else(|_| "unknown".to_string());
+        let os_version = os::os_version();
+        let fingerprint = os::generate_fingerprint();
+        let cpu_info = os::cpu_info();
+        let ram_info = os::ram_info();
+        let disk_info = os::disk_info();
+        let mac_addresses = os::mac_addresses();
+        let ip_addresses = os::ip_addresses();
+
         let url = format!("{}/v1/devices/{}/heartbeat", cfg.server, device_id);
-        let hb_body = serde_json::json!({ "agent_version": AGENT_VERSION });
+        let hb_body = serde_json::json!({
+            "agent_version": AGENT_VERSION,
+            "system_info": {
+                "hostname": hostname,
+                "os_version": os_version,
+                "fingerprint": fingerprint,
+                "cpu_info": cpu_info,
+                "ram_info": ram_info,
+                "disk_info": disk_info,
+                "mac_addresses": mac_addresses,
+                "ip_addresses": ip_addresses,
+            }
+        });
         match client
             .put(&url)
             .header("Authorization", format!("Bearer {}", install_token))
@@ -466,6 +539,14 @@ async fn reenroll(
     s.device_token = enroll_resp.device_token.clone();
     s.consecutive_heartbeat_failures = 0;
     s.persist(&cfg.server);
+
+    if let Some(ref employee) = enroll_resp.employee {
+        info!("Saving re-enrolled employee info to local database...");
+        if let Err(e) = s.store.save_employee_info(employee) {
+            warn!("Failed to save employee info to database: {}", e);
+        }
+    }
+
     info!(new_device_id = %enroll_resp.device_id, "Device re-enrolled with token");
     Ok(())
 }
@@ -566,30 +647,37 @@ async fn collect_loop(
             if idle_secs < IDLE_THRESHOLD_SECS {
                 match active_win {
                     Some(win) => {
-                        match &s.active_window {
-                            Some(current) if current.app_name == win.process_name && current.window_title == win.title => {}
-                            Some(_) => {
-                                if let Some(event) = s.close_active_window() {
-                                    info!(app = %event.app_name, dur = event.duration_sec, "Active window changed");
-                                    flush_events.push(event);
-                                }
-                                s.active_window = Some(ActiveWindowSession {
-                                    app_name: win.process_name.clone(),
-                                    window_title: win.title,
-                                    process_name: win.process_name.clone(),
-                                    process_id: win.process_id,
-                                    start_time: now,
-                                });
+                        if !agent_collectors::is_desktop_app(&win.process_name) {
+                            if let Some(event) = s.close_active_window() {
+                                info!(app = %event.app_name, dur = event.duration_sec, "Non-desktop app detected, closing session");
+                                flush_events.push(event);
                             }
-                            None => {
-                                info!(app = %win.process_name, title = %win.title, "New active window");
-                                s.active_window = Some(ActiveWindowSession {
-                                    app_name: win.process_name.clone(),
-                                    window_title: win.title,
-                                    process_name: win.process_name.clone(),
-                                    process_id: win.process_id,
-                                    start_time: now,
-                                });
+                        } else {
+                            match &s.active_window {
+                                Some(current) if current.app_name == win.process_name && current.window_title == win.title => {}
+                                Some(_) => {
+                                    if let Some(event) = s.close_active_window() {
+                                        info!(app = %event.app_name, dur = event.duration_sec, "Active window changed");
+                                        flush_events.push(event);
+                                    }
+                                    s.active_window = Some(ActiveWindowSession {
+                                        app_name: win.process_name.clone(),
+                                        window_title: win.title,
+                                        process_name: win.process_name.clone(),
+                                        process_id: win.process_id,
+                                        start_time: now,
+                                    });
+                                }
+                                None => {
+                                    info!(app = %win.process_name, title = %win.title, "New active window");
+                                    s.active_window = Some(ActiveWindowSession {
+                                        app_name: win.process_name.clone(),
+                                        window_title: win.title,
+                                        process_name: win.process_name.clone(),
+                                        process_id: win.process_id,
+                                        start_time: now,
+                                    });
+                                }
                             }
                         }
                     }
@@ -603,48 +691,28 @@ async fn collect_loop(
             }
         }
 
-        let procs = agent_collectors::get_running_applications();
-
-        let mut process_events = Vec::new();
-        for proc_info in &procs {
-            let result = agent_ml::classify_keyword_fallback(&proc_info.name);
-            let classification = result.category;
-            let confidence = result.confidence;
-            let window_title = if proc_info.cmdline.is_empty() {
-                proc_info.name.clone()
-            } else {
-                format!("{} - {}", proc_info.name, proc_info.cmdline)
-            };
-            process_events.push(AppUsageEventMeta {
-                app_name: proc_info.name.clone(),
-                window_title,
-                process_name: proc_info.name.clone(),
-                process_id: proc_info.pid,
-                start_time: now,
-                end_time: now,
-                duration_sec: proc_info.cpu_percent,
-                classification,
-                confidence,
-                role_id: None,
-                device_id: String::new(),
-            });
-        }
-
         {
             let mut s = state.lock().await;
+            flush_events.retain(|ev| agent_collectors::is_desktop_app(&ev.process_name));
             for ev in &mut flush_events {
                 ev.device_id = s.device_id.clone();
             }
             s.push_events(flush_events);
 
-            for ev in &mut process_events {
-                ev.device_id = s.device_id.clone();
-            }
-            s.push_events(process_events);
-
-            if !procs.is_empty() {
-                let app_summary: Vec<String> = procs.iter().take(5).map(|p| format!("{}({})", p.name, p.pid)).collect();
-                info!(idle = idle_secs, apps = ?app_summary, "Collection tick");
+            if !s.active_window.is_none() {
+                let idle = agent_collectors::get_idle_seconds();
+                if idle < IDLE_THRESHOLD_SECS {
+                    if let Some(ref session) = &s.active_window {
+                        if agent_collectors::is_desktop_app(&session.process_name) {
+                            let app_name = session.app_name.clone();
+                            let proc_name = session.process_name.clone();
+                            *s.app_durations.entry(app_name.clone()).or_insert(0.0) += 10.0;
+                            let result = agent_ml::classify_keyword_fallback(&proc_name);
+                            s.app_classifications.entry(app_name)
+                                .or_insert((result.category, result.confidence));
+                        }
+                    }
+                }
             }
         }
     }
@@ -670,6 +738,40 @@ async fn upload_loop(
             }
         }
 
+        let app_entries: Vec<AppUsageEntry> = {
+            let mut s = state.lock().await;
+            s.accumulate_app_usage()
+        };
+
+        if app_entries.is_empty() {
+            continue;
+        }
+
+        let (device_id, install_token) = {
+            let s = state.lock().await;
+            (s.device_id.clone(), s.install_token.clone())
+        };
+
+        let update = AppUsageUpdate {
+            device_id: device_id.clone(),
+            apps: app_entries.clone(),
+        };
+
+        match upload_app_usage(&client, &cfg.server, &install_token, &update).await {
+            Ok(()) => {
+                info!(device_id, "App usage update uploaded successfully");
+            }
+            Err(e) => {
+                error!("App usage upload failed: {}, re-queuing data for next cycle", e);
+                let mut s = state.lock().await;
+                for entry in &app_entries {
+                    *s.app_durations.entry(entry.app_name.clone()).or_insert(0.0) += entry.duration_sec;
+                    *s.app_opens.entry(entry.app_name.clone()).or_insert(0) += entry.open_count;
+                    s.app_classifications.entry(entry.app_name.clone()).or_insert((entry.classification.clone(), entry.confidence));
+                }
+            }
+        }
+
         let events: Vec<AppUsageEventMeta> = {
             let mut s = state.lock().await;
             std::mem::take(&mut s.events)
@@ -679,13 +781,8 @@ async fn upload_loop(
             continue;
         }
 
-        let (device_id, install_token) = {
-            let s = state.lock().await;
-            (s.device_id.clone(), s.install_token.clone())
-        };
-
         if let Err(e) = upload_events(&client, &cfg.server, &state, &device_id, &install_token, events).await {
-            error!("Upload cycle failed: {}", e);
+            error!("Legacy event upload failed: {}", e);
         }
     }
 }
@@ -891,39 +988,29 @@ async fn screenshot_interval_loop(
                 let commander = agent_screenshot::ScreenshotCommander::new();
                 match commander.capture().await {
                     Ok(image_data) => {
-                        info!(size = image_data.len(), "Auto screenshot captured, uploading");
-                        let url = format!("{}/v1/screenshot/upload", server);
-                        let file_part = reqwest::multipart::Part::bytes(image_data)
-                            .file_name("screenshot.png")
-                            .mime_str("image/png");
-                        match file_part {
-                            Ok(part) => {
-                                let form = reqwest::multipart::Form::new()
-                                    .text("request_id", format!("auto-{}", chrono::Utc::now().timestamp()))
-                                    .text("device_id", device_id.clone())
-                                    .part("image", part);
+                        info!(size = image_data.len(), "Auto screenshot captured");
 
-                                match client
-                                    .post(&url)
-                                    .header("Authorization", format!("Bearer {}", install_token))
-                                    .multipart(form)
-                                    .send()
-                                    .await
-                                {
-                                    Ok(resp) if resp.status().is_success() => {
-                                        info!("Auto screenshot uploaded successfully");
+                        // Run local AI compliance audit asynchronously, but skip if one is already running
+                        {
+                            let mut s = state.lock().await;
+                            if s.audit_in_progress {
+                                info!("Audit already in progress, skipping duplicate");
+                            } else {
+                                s.audit_in_progress = true;
+                                let audit_state = Arc::clone(&state);
+                                let audit_client = client.clone();
+                                let audit_server = server.clone();
+                                let audit_token = install_token.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = run_local_ai_audit(&audit_state, &audit_client, &audit_server, &audit_token).await {
+                                        error!("Error running local AI compliance audit: {}", e);
                                     }
-                                    Ok(resp) => {
-                                        let status = resp.status();
-                                        warn!(status = status.as_u16(), "Auto screenshot upload failed");
+                                    {
+                                        let mut s = audit_state.lock().await;
+                                        s.audit_in_progress = false;
+                                        info!("Audit task completed, flag cleared");
                                     }
-                                    Err(e) => {
-                                        warn!("Auto screenshot upload error: {}", e);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Auto screenshot mime error: {}", e);
+                                });
                             }
                         }
                     }
@@ -1005,6 +1092,120 @@ async fn network_loop(
     }
 }
 
+// ── Activity Buffer loop ───────────────────────────────────────────────────
+
+async fn activity_buffer_loop(
+    client: reqwest::Client,
+    cfg: ResolvedConfig,
+    state: Arc<Mutex<AgentState>>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut tick = interval(Duration::from_secs(ACTIVITY_BUFFER_SAMPLE_SECS));
+    tick.tick().await; // skip first immediate tick
+
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                let idle_secs = agent_collectors::get_idle_seconds();
+                if idle_secs >= IDLE_THRESHOLD_SECS {
+                    info!(idle_secs, "Skipping activity buffer sample: user idle");
+                    continue;
+                }
+
+                let should_summarize = {
+                    let mut s = state.lock().await;
+                    s.activity_buffer.sample().await;
+                    let ready = s.activity_buffer.should_summarize();
+                    if ready {
+                        info!("Activity window complete, draining buffer for batch upload + AI summarization");
+                        let (role_name, role_desc) = match s.rule_engine.get_rules() {
+                            Some(r) => match &r.role {
+                                Some(role) => (role.name.clone(), role.work_description.clone()),
+                                None => ("General Employee".to_string(), "General work duties".to_string()),
+                            },
+                            None => ("Unknown".to_string(), "No role assigned".to_string()),
+                        };
+
+                        let (screenshots, app_usage) = s.activity_buffer.drain_for_batch();
+                        let (device_id, install_token) = (s.device_id.clone(), s.install_token.clone());
+
+                        if let Err(e) = s.activity_buffer.summarize(&role_name, &role_desc).await {
+                            error!("Activity buffer summarization failed: {}", e);
+                        }
+
+                        drop(s);
+
+                        if !screenshots.is_empty() || !app_usage.is_empty() {
+                            let server = cfg.server.clone();
+                            if let Err(e) = upload_batch_screenshots(&client, &server, &install_token, &device_id, screenshots, app_usage).await {
+                                warn!("Batch screenshot upload failed: {}", e);
+                            }
+                        }
+                    }
+                    ready
+                };
+
+                if should_summarize {
+                    info!("Activity buffer summarized and batch-uploaded");
+                }
+            }
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    info!("Activity buffer loop shutting down");
+                    return;
+                }
+            }
+        }
+    }
+}
+
+// ── Activity Summary Sync loop ─────────────────────────────────────────────
+
+async fn activity_sync_loop(
+    client: reqwest::Client,
+    cfg: ResolvedConfig,
+    state: Arc<Mutex<AgentState>>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut tick = interval(Duration::from_secs(ACTIVITY_SYNC_INTERVAL_SECS));
+    tick.tick().await; // skip first immediate tick
+
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                let (install_token, server) = {
+                    let s = state.lock().await;
+                    (s.install_token.clone(), cfg.server.clone())
+                };
+
+                // Sync pending summaries to backend
+                {
+                    let s = state.lock().await;
+                    if let Err(e) = s.activity_buffer.sync_to_backend(&client, &server, &install_token).await {
+                        warn!("Activity summary sync failed: {}", e);
+                    }
+                }
+
+                // Purge summaries older than 24h
+                {
+                    let s = state.lock().await;
+                    if let Err(e) = s.activity_buffer.purge_old_summaries().await {
+                        warn!("Activity summary purge failed: {}", e);
+                    }
+                }
+
+                info!("Activity summary sync cycle complete");
+            }
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    info!("Activity sync loop shutting down");
+                    return;
+                }
+            }
+        }
+    }
+}
+
 async fn upload_events(
     client: &reqwest::Client,
     server: &str,
@@ -1071,6 +1272,88 @@ async fn upload_events(
     }
 
     Ok(())
+}
+
+async fn upload_app_usage(
+    client: &reqwest::Client,
+    server: &str,
+    install_token: &str,
+    update: &AppUsageUpdate,
+) -> Result<()> {
+    let resp = client
+        .post(format!("{}/v1/events/app-usage", server))
+        .header("Authorization", format!("Bearer {}", install_token))
+        .json(update)
+        .send()
+        .await;
+
+    match resp {
+        Ok(resp) if resp.status().is_success() => {
+            Ok(())
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(anyhow::anyhow!("App usage upload server error: status={} body={}", status, body))
+        }
+        Err(e) => {
+            Err(anyhow::anyhow!("App usage upload network error: {}", e))
+        }
+    }
+}
+
+async fn upload_installed_apps(
+    client: &reqwest::Client,
+    server: &str,
+    install_token: &str,
+    device_id: &str,
+    entries: &[DigitalProfileEntry],
+    installed_apps: &[agent_collectors::InstalledApp],
+) -> Result<()> {
+    let app_map: std::collections::HashMap<String, &agent_collectors::InstalledApp> = installed_apps
+        .iter()
+        .map(|a| (a.app_name.clone(), a))
+        .collect();
+
+    let apps: Vec<agent_proto::events::InstalledAppEntry> = entries.iter().map(|e| {
+        let installed = app_map.get(&e.app_name);
+        agent_proto::events::InstalledAppEntry {
+            app_name: e.app_name.clone(),
+            display_name: e.display_name.clone().unwrap_or_default(),
+            publisher: installed.map(|a| a.publisher.clone()).unwrap_or_default(),
+            install_path: installed.and_then(|a| a.install_path.clone()),
+            category: e.category.clone(),
+            confidence: e.confidence,
+            source: e.source.clone(),
+        }
+    }).collect();
+
+    let req = agent_proto::events::InstalledAppsUploadRequest {
+        device_id: device_id.to_string(),
+        apps,
+    };
+
+    let resp = client
+        .post(format!("{}/v1/events/installed-apps", server))
+        .header("Authorization", format!("Bearer {}", install_token))
+        .json(&req)
+        .send()
+        .await;
+
+    match resp {
+        Ok(resp) if resp.status().is_success() => {
+            info!(count = entries.len(), "Installed apps uploaded successfully");
+            Ok(())
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(anyhow::anyhow!("Installed apps upload server error: status={} body={}", status, body))
+        }
+        Err(e) => {
+            Err(anyhow::anyhow!("Installed apps upload network error: {}", e))
+        }
+    }
 }
 
 enum UploadError {
@@ -1216,7 +1499,14 @@ async fn handle_screenshot_request(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    info!(request_id, "Processing screenshot_request");
+    let schedule_id = cmd.payload.get("schedule_id")
+        .and_then(|v| v.as_str());
+
+    if let Some(sid) = schedule_id {
+        info!(request_id, schedule_id = %sid, "Processing targeted screenshot request");
+    } else {
+        info!(request_id, "Processing screenshot request");
+    }
 
     #[cfg(target_os = "windows")]
     if agent_screenshot::is_session_zero() {
@@ -1255,9 +1545,15 @@ async fn handle_screenshot_request(
         .mime_str("image/png")
         .map_err(|e| anyhow::anyhow!("mime error: {}", e))?;
 
+    let (window_title, app_name) = agent_collectors::get_active_window()
+        .map(|w| (w.title, w.process_name))
+        .unwrap_or_else(|| (String::new(), String::new()));
+
     let form = reqwest::multipart::Form::new()
         .text("request_id", request_id.to_string())
         .text("device_id", device_id.to_string())
+        .text("window_title", window_title.clone())
+        .text("app_name", app_name.clone())
         .part("image", file_part);
 
     let resp = client
@@ -1307,7 +1603,12 @@ async fn socket_command_loop(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(SocketCommand::ScreenshotRequest { command_id, payload }) => {
-                        info!(command_id = %command_id, "Processing screenshot_request from Socket.IO");
+                        let schedule_id = payload.get("schedule_id").and_then(|v| v.as_str());
+                        if let Some(sid) = schedule_id {
+                            info!(command_id = %command_id, schedule_id = %sid, "Processing targeted screenshot_request from Socket.IO");
+                        } else {
+                            info!(command_id = %command_id, "Processing screenshot_request from Socket.IO");
+                        }
                         let pending_cmd = PendingCommand {
                             id: command_id,
                             device_id: device_id.to_string(),
@@ -1331,9 +1632,13 @@ async fn socket_command_loop(
                     Some(SocketCommand::PolicyUpdate { command_id, payload }) => {
                         info!(command_id = %command_id, "Processing PolicyUpdate command");
                         if let Ok(rules) = serde_json::from_value::<agent_proto::events::RulesInfo>(payload.clone()) {
+                            let new_screenshot_enabled = rules.policy.screenshot_enabled;
+                            let new_interval = if rules.policy.upload_interval > 0 { rules.policy.upload_interval as u64 } else { SCREENSHOT_INTERVAL_SECS };
                             let mut s = state.lock().await;
                             s.rule_engine.update_rules(rules);
-                            info!(command_id = %command_id, "Rule engine updated from PolicyUpdate");
+                            s.screenshot_enabled = new_screenshot_enabled;
+                            s.screenshot_interval_secs = new_interval;
+                            info!(command_id = %command_id, screenshot_enabled = new_screenshot_enabled, interval_secs = new_interval, "Rule engine and screenshot policy updated from PolicyUpdate");
                         } else {
                             warn!(command_id = %command_id, "Failed to parse PolicyUpdate payload as RulesInfo");
                         }
@@ -1497,7 +1802,9 @@ async fn socket_command_loop(
                             });
 
                             if let Some(role) = role_info {
-                                summary.as_object_mut().unwrap().insert("role".to_string(), role);
+                                if let Some(summary_obj) = summary.as_object_mut() {
+                                    summary_obj.insert("role".to_string(), role);
+                                }
                             }
 
                             let report = serde_json::json!({
@@ -1540,6 +1847,14 @@ async fn socket_command_loop(
 // ── Main ────────────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+        unsafe {
+            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+
     let args = Args::parse();
 
     if args.take_screenshot {
@@ -1589,14 +1904,6 @@ fn main() -> Result<()> {
 }
 
 fn run_take_screenshot(args: &Args) -> Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::System::Console::FreeConsole;
-        unsafe {
-            let _ = FreeConsole();
-        }
-    }
-
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         tracing_subscriber::fmt()
@@ -1625,9 +1932,16 @@ fn run_take_screenshot(args: &Args) -> Result<()> {
             .file_name("screenshot.png")
             .mime_str("image/png")
             .map_err(|e| anyhow::anyhow!("mime error: {}", e))?;
+
+        let (window_title, app_name) = agent_collectors::get_active_window()
+            .map(|w| (w.title, w.process_name))
+            .unwrap_or_else(|| (String::new(), String::new()));
+
         let form = reqwest::multipart::Form::new()
             .text("request_id", request_id.to_string())
             .text("device_id", device_id.to_string())
+            .text("window_title", window_title)
+            .text("app_name", app_name)
             .part("image", file_part);
 
         let resp = client.post(&url)
@@ -1643,7 +1957,6 @@ fn run_take_screenshot(args: &Args) -> Result<()> {
             let body = resp.text().await.unwrap_or_default();
             error!(status = status.as_u16(), "Screenshot upload failed: {}", body);
         }
-
         Ok(())
     })
 }
@@ -1733,7 +2046,13 @@ async fn run_agent() -> Result<()> {
             }
             re
         },
-        store,
+        store: store.clone(),
+        activity_buffer: ActivityBuffer::new(store, device_id.clone()),
+        app_durations: HashMap::new(),
+        app_opens: HashMap::new(),
+        app_classifications: HashMap::new(),
+        digital_profile: Vec::new(),
+        audit_in_progress: false,
     }));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -1821,6 +2140,22 @@ async fn run_agent() -> Result<()> {
         browser_tabs_loop(browser_client, browser_cfg, browser_state, browser_shutdown).await;
     });
 
+    let ab_state = Arc::clone(&state);
+    let ab_client = client.clone();
+    let ab_cfg = cfg.clone();
+    let ab_shutdown = shutdown_rx.clone();
+    let activity_buffer_handle = tokio::spawn(async move {
+        activity_buffer_loop(ab_client, ab_cfg, ab_state, ab_shutdown).await;
+    });
+
+    let as_client = client.clone();
+    let as_cfg = cfg.clone();
+    let as_state = Arc::clone(&state);
+    let as_shutdown = shutdown_rx.clone();
+    let activity_sync_handle = tokio::spawn(async move {
+        activity_sync_loop(as_client, as_cfg, as_state, as_shutdown).await;
+    });
+
     let poll_client = client.clone();
     let poll_cfg = cfg.clone();
     let poll_state = Arc::clone(&state);
@@ -1854,6 +2189,19 @@ async fn run_agent() -> Result<()> {
         }
     });
 
+    // Build digital profile on startup
+    info!("Building digital profile on startup...");
+    digital_profile_startup(&state, &client, &cfg.server, &install_token).await;
+
+    let dp_client = client.clone();
+    let dp_server = cfg.server.clone();
+    let dp_install_token = install_token.clone();
+    let dp_state = Arc::clone(&state);
+    let dp_shutdown = shutdown_rx.clone();
+    let dp_refresh_handle = tokio::spawn(async move {
+        digital_profile_refresh_loop(dp_state, dp_client, dp_server, dp_install_token, dp_shutdown).await;
+    });
+
     info!("AINMS Agent running. Press Ctrl+C to stop.");
 
     tokio::signal::ctrl_c().await?;
@@ -1862,6 +2210,21 @@ async fn run_agent() -> Result<()> {
     let _ = shutdown_tx.send(true);
 
     {
+        let app_entries: Vec<AppUsageEntry> = {
+            let mut s = state.lock().await;
+            s.accumulate_app_usage()
+        };
+
+        if !app_entries.is_empty() {
+            info!(count = app_entries.len(), "Attempting final upload of accumulated app usage...");
+            if let Err(e) = upload_app_usage(&client, &cfg.server, &install_token, &AppUsageUpdate {
+                device_id: device_id.clone(),
+                apps: app_entries,
+            }).await {
+                warn!("Final app usage upload failed: {}", e);
+            }
+        }
+
         let events: Vec<AppUsageEventMeta> = {
             let mut s = state.lock().await;
             std::mem::take(&mut s.events)
@@ -1914,13 +2277,195 @@ async fn run_agent() -> Result<()> {
     network_handle.abort();
     net_upload_handle.abort();
     browser_handle.abort();
+    activity_buffer_handle.abort();
+    activity_sync_handle.abort();
     poll_handle.abort();
+    dp_refresh_handle.abort();
     if let Some(h) = socket_cmd_handle {
         h.abort();
     }
 
     info!("AINMS Agent stopped.");
     Ok(())
+}
+
+// ── Digital Profile ──────────────────────────────────────────────────────────
+
+async fn fetch_rules_from_server(
+    client: &reqwest::Client,
+    server: &str,
+    device_id: &str,
+    install_token: &str,
+) -> Result<agent_proto::events::RulesInfo> {
+    let url = format!("{}/v1/rules/sync?device_id={}", server, device_id);
+
+    let result = retry_with_backoff(
+        "fetch_rules_from_server",
+        3,
+        2,
+        || async {
+            let resp = client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", install_token))
+                .send()
+                .await
+                .context("Network error fetching rules")?;
+
+            if resp.status().is_success() {
+                let rules: agent_proto::events::RulesInfo = resp.json().await
+                    .context("Failed to parse rules response")?;
+                Ok(rules)
+            } else if resp.status().as_u16() == 404 {
+                // No rules configured for this device yet — not an error, just empty
+                Ok(agent_proto::events::RulesInfo::default())
+            } else {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                Err(anyhow::anyhow!("Fetch rules returned status {}: {}", status, body))
+            }
+        },
+    )
+    .await;
+
+    match result {
+        Ok(rules) => {
+            info!(app_rules = rules.app_classifications.len(), alert_rules = rules.alert_rules.len(), "Fetched rules from server");
+            Ok(rules)
+        }
+        Err(e) => {
+            warn!("All retries exhausted for fetching rules: {}. Will use cached rules or keyword fallback.", e);
+            Err(e)
+        }
+    }
+}
+
+fn build_digital_profile(
+    role_name: &str,
+    rules: Option<&agent_proto::events::RulesInfo>,
+) -> (Vec<DigitalProfileEntry>, Vec<agent_collectors::InstalledApp>) {
+    let installed = agent_collectors::scan_installed_apps();
+    let now = Utc::now().to_rfc3339();
+    let mut entries = Vec::new();
+
+    let empty_classifications = Vec::new();
+    let server_classifications = rules
+        .map(|r| &r.app_classifications)
+        .unwrap_or(&empty_classifications);
+
+    for app in &installed {
+        let (category, confidence, source) = if let Some(rule_match) = server_classifications
+            .iter()
+            .find(|ac| {
+                app.app_name.to_lowercase().contains(&ac.app_name.to_lowercase())
+                || app.display_name.to_lowercase().contains(&ac.app_name.to_lowercase())
+            })
+        {
+            (rule_match.category.clone(), 0.95, "rule")
+        } else {
+            let result = agent_ml::classify_keyword_fallback(&app.app_name);
+            (result.category, result.confidence, "keyword_fallback")
+        };
+
+        entries.push(DigitalProfileEntry {
+            app_name: app.app_name.clone(),
+            display_name: Some(app.display_name.clone()),
+            role_name: role_name.to_string(),
+            category,
+            confidence,
+            source: source.to_string(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        });
+    }
+
+    info!(count = entries.len(), "Built digital profile for role '{}'", role_name);
+    (entries, installed)
+}
+
+async fn digital_profile_startup(
+    state: &Arc<Mutex<AgentState>>,
+    client: &reqwest::Client,
+    server: &str,
+    install_token: &str,
+) {
+    let (device_id, current_rules) = {
+        let s = state.lock().await;
+        (s.device_id.clone(), s.rule_engine.get_rules().cloned())
+    };
+
+    let rules = match fetch_rules_from_server(client, server, &device_id, install_token).await {
+        Ok(r) => {
+            let mut s = state.lock().await;
+            s.rule_engine.update_rules(r.clone());
+            Some(r)
+        }
+        Err(e) => {
+            warn!("Failed to fetch rules from server: {}. Using cached rules.", e);
+            current_rules
+        }
+    };
+
+    if rules.is_none() {
+        info!("No rules available — skipping digital profile build");
+        return;
+    }
+
+    let role_info = rules.as_ref().and_then(|r| r.role.as_ref());
+    let role_name = role_info
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| "General Employee".to_string());
+
+    {
+        let s = state.lock().await;
+        if let Err(e) = s.store.delete_digital_profiles_for_role(&role_name) {
+            warn!("Failed to clear old digital profile for role '{}': {}", role_name, e);
+        }
+    }
+
+    let (entries, installed_apps) = build_digital_profile(&role_name, rules.as_ref());
+
+    {
+        let s = state.lock().await;
+        if let Err(e) = s.store.save_digital_profiles(&entries) {
+            warn!("Failed to save digital profile: {}", e);
+        }
+    }
+
+    {
+        let mut s = state.lock().await;
+        s.digital_profile = entries.clone();
+        info!(role = %role_name, "Digital profile loaded into agent state");
+    }
+
+    if let Err(e) = upload_installed_apps(client, server, install_token, &device_id, &entries, &installed_apps).await {
+        warn!("Failed to upload installed apps: {}", e);
+    }
+}
+
+async fn digital_profile_refresh_loop(
+    state: Arc<Mutex<AgentState>>,
+    client: reqwest::Client,
+    server: String,
+    install_token: String,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut tick = interval(Duration::from_secs(86400));
+    tick.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                info!("Refreshing digital profile (daily)...");
+                digital_profile_startup(&state, &client, &server, &install_token).await;
+            }
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    info!("Digital profile refresh loop shutting down");
+                    return;
+                }
+            }
+        }
+    }
 }
 
 async fn try_resume_or_enroll(
@@ -1939,7 +2484,15 @@ async fn try_resume_or_enroll(
                     if let Err(e) = store.save_agent_state(&cfg.server, &a.install_token, &a.device_id, &a.device_token) {
                         warn!("Failed to persist resumed state to database: {}", e);
                     }
-                    return Ok((a.device_id.clone(), a.device_token.clone(), a.install_token.clone(), None));
+                    if let Ok(Some(emp)) = store.load_employee_info() {
+                        info!("Loaded cached employee info: {} (ID: {})", emp.name, emp.employee_id);
+                    }
+                    // Fetch rules to get screenshot_enabled policy and other server-side config
+                    let rules = fetch_rules_from_server(client, &cfg.server, &a.device_id, &a.install_token).await.ok();
+                    if let Some(ref r) = rules {
+                        info!("Fetched rules after resume: screenshot_enabled={}, upload_interval={}", r.policy.screenshot_enabled, r.policy.upload_interval);
+                    }
+                    return Ok((a.device_id.clone(), a.device_token.clone(), a.install_token.clone(), rules));
                 }
                 Err(e) => {
                     warn!("Saved state heartbeat failed: {}, proceeding to re-enroll", e);
@@ -1976,6 +2529,13 @@ async fn try_resume_or_enroll(
                 warn!("Failed to save agent state to database: {}", e);
             }
 
+            if let Some(ref employee) = enroll_resp.employee {
+                info!("Saving enrolled employee info to local database...");
+                if let Err(e) = store.save_employee_info(employee) {
+                    warn!("Failed to save employee info to database: {}", e);
+                }
+            }
+
             let rules = enroll_resp.rules.clone();
             return Ok((enroll_resp.device_id, enroll_resp.device_token, install_token.clone(), rules));
         }
@@ -1991,10 +2551,35 @@ async fn try_heartbeat(
     device_id: &str,
     install_token: &str,
 ) -> Result<()> {
+    let hostname = gethostname::gethostname()
+        .into_string()
+        .unwrap_or_else(|_| "unknown".to_string());
+    let os_version = os::os_version();
+    let fingerprint = os::generate_fingerprint();
+    let cpu_info = os::cpu_info();
+    let ram_info = os::ram_info();
+    let disk_info = os::disk_info();
+    let mac_addresses = os::mac_addresses();
+    let ip_addresses = os::ip_addresses();
+
     let url = format!("{}/v1/devices/{}/heartbeat", server, device_id);
+    let hb_body = serde_json::json!({
+        "agent_version": AGENT_VERSION,
+        "system_info": {
+            "hostname": hostname,
+            "os_version": os_version,
+            "fingerprint": fingerprint,
+            "cpu_info": cpu_info,
+            "ram_info": ram_info,
+            "disk_info": disk_info,
+            "mac_addresses": mac_addresses,
+            "ip_addresses": ip_addresses,
+        }
+    });
     let resp = client
         .put(&url)
         .header("Authorization", format!("Bearer {}", install_token))
+        .json(&hb_body)
         .send()
         .await
         .context("Heartbeat request failed")?;
@@ -2006,4 +2591,203 @@ async fn try_heartbeat(
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("Heartbeat failed with status {}: {}", status, body);
     }
+}
+
+async fn run_local_ai_audit(
+    state: &Arc<Mutex<AgentState>>,
+    client: &reqwest::Client,
+    server: &str,
+    install_token: &str,
+) -> Result<()> {
+    let device_id = {
+        let s = state.lock().await;
+        s.device_id.clone()
+    };
+
+    let alerts = poll_alerts(client, server, &device_id, install_token).await?;
+    if alerts.is_empty() {
+        return Ok(());
+    }
+
+    for alert in alerts {
+        let already_shown = {
+            let s = state.lock().await;
+            s.store.is_alert_shown(&alert.id).unwrap_or(false)
+        };
+        if already_shown { continue; }
+
+        match alert.decision.as_str() {
+            "violation" => {
+                let msg = alert.message.clone();
+                let alert_id = alert.id.clone();
+                let prompt_res = tokio::task::spawn_blocking(move || {
+                    dialog::prompt("AINMS Compliance Alert", &msg)
+                }).await?;
+
+                let explanation = match prompt_res {
+                    Ok(dialog::PromptResult { text: Some(text) }) if !text.trim().is_empty() => text,
+                    _ => "No explanation provided".to_string(),
+                };
+
+                info!(explanation = %explanation, "Captured user justification");
+
+                let payload = serde_json::json!({
+                    "device_id": device_id,
+                    "alert_id": alert_id,
+                    "app_name": "",
+                    "window_title": "",
+                    "decision": "violation",
+                    "explanation": explanation,
+                    "popup_type": "modal",
+                    "classification": "unproductive",
+                    "confidence": 0.90,
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                });
+
+                let url = format!("{}/v1/events/popup", server);
+                match client.post(&url)
+                    .header("Authorization", format!("Bearer {}", install_token))
+                    .json(&payload)
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        info!("Popup violation report sent to server successfully");
+                    }
+                    Ok(resp) => {
+                        warn!(status = resp.status().as_u16(), "Failed to send popup report to server");
+                    }
+                    Err(e) => {
+                        warn!("Network error sending popup report to server: {}", e);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        {
+            let s = state.lock().await;
+            let _ = s.store.mark_alert_shown(&alert.id);
+        }
+        let _ = ack_alert(client, server, install_token, &alert.id).await;
+    }
+
+    Ok(())
+}
+
+async fn upload_batch_screenshots(
+    client: &reqwest::Client,
+    server: &str,
+    install_token: &str,
+    device_id: &str,
+    screenshots: Vec<(chrono::DateTime<Utc>, Vec<u8>, String, String)>,
+    app_usage: Vec<(String, f64, u64, String)>,
+) -> Result<()> {
+    let url = format!("{}/v1/screenshot/batch-upload", server);
+
+    let metadata: Vec<serde_json::Value> = screenshots
+        .iter()
+        .enumerate()
+        .map(|(_i, (ts, _data, app_name, window_title))| {
+            serde_json::json!({
+                "request_id": uuid::Uuid::new_v4().to_string(),
+                "window_title": window_title,
+                "app_name": app_name,
+                "captured_at": ts.to_rfc3339(),
+            })
+        })
+        .collect();
+
+    let app_usage_json: Vec<serde_json::Value> = app_usage
+        .iter()
+        .map(|(app_name, duration_secs, sample_count, window_title)| {
+            serde_json::json!({
+                "app_name": app_name,
+                "duration_secs": duration_secs,
+                "sample_count": sample_count,
+                "window_title": window_title,
+            })
+        })
+        .collect();
+
+    let mut form = reqwest::multipart::Form::new()
+        .text("device_id", device_id.to_string())
+        .text("metadata", serde_json::to_string(&metadata).unwrap_or_default())
+        .text("app_usage", serde_json::to_string(&app_usage_json).unwrap_or_default());
+
+    for (i, (_ts, data, _app_name, _window_title)) in screenshots.iter().enumerate() {
+        if let Ok(part) = reqwest::multipart::Part::bytes(data.clone())
+            .file_name(format!("screenshot_{}.png", i))
+            .mime_str("image/png")
+        {
+            form = form.part(format!("image_{}", i), part);
+        }
+    }
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", install_token))
+        .multipart(form)
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        info!("Batch screenshot upload successful ({} images + app usage)", screenshots.len());
+    } else {
+        let status = resp.status();
+        warn!(status = status.as_u16(), "Batch screenshot upload failed");
+    }
+
+    Ok(())
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct ComplianceAlert {
+    id: String,
+    decision: String,
+    message: String,
+}
+
+async fn poll_alerts(
+    client: &reqwest::Client,
+    server: &str,
+    device_id: &str,
+    install_token: &str,
+) -> Result<Vec<ComplianceAlert>> {
+    let url = format!("{}/v1/devices/{}/alerts", server, device_id);
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", install_token))
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        let alerts: Vec<ComplianceAlert> = resp.json().await?;
+        Ok(alerts)
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        warn!(status = status.as_u16(), "Alert poll failed: {}", body);
+        Ok(Vec::new())
+    }
+}
+
+async fn ack_alert(
+    client: &reqwest::Client,
+    server: &str,
+    install_token: &str,
+    alert_id: &str,
+) -> Result<()> {
+    let url = format!("{}/v1/alerts/{}/ack", server, alert_id);
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", install_token))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        warn!(status = status.as_u16(), "Alert ack failed for {}", alert_id);
+    }
+    Ok(())
 }

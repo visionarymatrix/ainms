@@ -56,7 +56,24 @@ pub fn prompt(title: &str, message: &str) -> Result<PromptResult> {
 // ── Windows (Win32 API) ────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
+fn init_visual_styles() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        use windows::Win32::UI::Controls::{InitCommonControlsEx, INITCOMMONCONTROLSEX, ICC_STANDARD_CLASSES};
+        let icex = INITCOMMONCONTROLSEX {
+            dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_STANDARD_CLASSES,
+        };
+        unsafe {
+            let _ = InitCommonControlsEx(&icex);
+        }
+    });
+}
+
+#[cfg(target_os = "windows")]
 fn ask_windows(title: &str, message: &str) -> Result<DialogAnswer> {
+    init_visual_styles();
     if is_session_zero() {
         info!("Running in Session 0, spawning dialog helper in user session");
         return spawn_dialog_helper_in_user_session("ask", title, message);
@@ -66,6 +83,7 @@ fn ask_windows(title: &str, message: &str) -> Result<DialogAnswer> {
 
 #[cfg(target_os = "windows")]
 fn notify_windows(title: &str, message: &str) -> Result<()> {
+    init_visual_styles();
     if is_session_zero() {
         info!("Running in Session 0, spawning dialog helper in user session");
         let _ = spawn_dialog_helper_in_user_session("notify", title, message);
@@ -76,6 +94,7 @@ fn notify_windows(title: &str, message: &str) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn prompt_windows(title: &str, message: &str) -> Result<PromptResult> {
+    init_visual_styles();
     if is_session_zero() {
         info!("Running in Session 0, spawning dialog helper in user session");
         return spawn_prompt_helper_in_user_session(title, message);
@@ -171,6 +190,13 @@ fn build_prompt_dialog_template(title_w: &[u16], message_w: &[u16]) -> Vec<u8> {
     //
     // DLGITEMTEMPLATE: style(4) + exStyle(4) + x(2) + y(2) + cx(2) + cy(2) + id(2)
     //   then class(0xFFFF+atom or wstring) + title(wstring or 0xFFFF+id) + extra(2)
+    //
+    // Layout (dialog units, will be dynamically resized in WM_INITDIALOG):
+    //   cx=250, cy=80  (initial size, gets resized after text measurement)
+    //   STATIC  ID=101: x=7,  y=7,  cx=236, cy=16
+    //   EDIT    ID=102: x=7,  y=30, cx=236, cy=14
+    //   Submit  ID=103: x=55, y=50, cx=60,  cy=16
+    //   Dismiss ID=104: x=125,y=50, cx=60,  cy=16
 
     let mut t: Vec<u8> = Vec::new();
 
@@ -185,8 +211,8 @@ fn build_prompt_dialog_template(title_w: &[u16], message_w: &[u16]) -> Vec<u8> {
     push16(&mut t, 4);          // cdit
     push16(&mut t, 0);          // x
     push16(&mut t, 0);          // y
-    push16(&mut t, 200);        // cx
-    push16(&mut t, 80);         // cy
+    push16(&mut t, 250);        // cx (initial width, resized dynamically)
+    push16(&mut t, 80);         // cy (initial height, resized dynamically)
     push16(&mut t, 0);          // menu: none
     push16(&mut t, 0);          // class: default
     push_wstr(&mut t, title_w); // title
@@ -196,10 +222,10 @@ fn build_prompt_dialog_template(title_w: &[u16], message_w: &[u16]) -> Vec<u8> {
     align4(&mut t);
 
     // ── DLGITEM 1: STATIC text, ID=101 ──
-    push32(&mut t, 0x50000000); // WS_CHILD|WS_VISIBLE
+    push32(&mut t, 0x50020000); // WS_CHILD|WS_VISIBLE|SS_NOPREFIX
     push32(&mut t, 0);          // exStyle
     push16(&mut t, 7); push16(&mut t, 7);   // x,y
-    push16(&mut t, 186); push16(&mut t, 28); // cx,cy
+    push16(&mut t, 236); push16(&mut t, 16); // cx,cy (resized dynamically)
     push16(&mut t, 101); // id
     push16(&mut t, 0xFFFF); push16(&mut t, 0x0082); // class=STATIC atom
     push_wstr(&mut t, message_w); // title=message
@@ -210,8 +236,8 @@ fn build_prompt_dialog_template(title_w: &[u16], message_w: &[u16]) -> Vec<u8> {
     // ── DLGITEM 2: EDIT, ID=102 ──
     push32(&mut t, 0x50810080); // WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_BORDER|ES_AUTOHSCROLL
     push32(&mut t, 0);          // exStyle
-    push16(&mut t, 7); push16(&mut t, 40);
-    push16(&mut t, 186); push16(&mut t, 14);
+    push16(&mut t, 7); push16(&mut t, 30);
+    push16(&mut t, 236); push16(&mut t, 14);
     push16(&mut t, 102);
     push16(&mut t, 0xFFFF); push16(&mut t, 0x0081); // class=EDIT atom
     push16(&mut t, 0); // title=empty
@@ -222,8 +248,8 @@ fn build_prompt_dialog_template(title_w: &[u16], message_w: &[u16]) -> Vec<u8> {
     // ── DLGITEM 3: BUTTON "Submit" (default push), ID=103 ──
     push32(&mut t, 0x50010001); // WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON
     push32(&mut t, 0);
-    push16(&mut t, 100); push16(&mut t, 58);
-    push16(&mut t, 45); push16(&mut t, 14);
+    push16(&mut t, 55); push16(&mut t, 50);
+    push16(&mut t, 60); push16(&mut t, 16);
     push16(&mut t, 103);
     push16(&mut t, 0xFFFF); push16(&mut t, 0x0080); // class=BUTTON atom
     push_wstr(&mut t, encode_wide("Submit").as_slice());
@@ -234,8 +260,8 @@ fn build_prompt_dialog_template(title_w: &[u16], message_w: &[u16]) -> Vec<u8> {
     // ── DLGITEM 4: BUTTON "Dismiss", ID=104 ──
     push32(&mut t, 0x50010000); // WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON
     push32(&mut t, 0);
-    push16(&mut t, 148); push16(&mut t, 58);
-    push16(&mut t, 45); push16(&mut t, 14);
+    push16(&mut t, 125); push16(&mut t, 50);
+    push16(&mut t, 60); push16(&mut t, 16);
     push16(&mut t, 104);
     push16(&mut t, 0xFFFF); push16(&mut t, 0x0080); // class=BUTTON atom
     push_wstr(&mut t, encode_wide("Dismiss").as_slice());
@@ -256,7 +282,108 @@ unsafe extern "system" fn prompt_dialog_proc(
 
     match msg {
         WM_INITDIALOG => {
+            use windows::Win32::Graphics::Gdi as Gdi;
+
             let _ = SetForegroundWindow(hwnd);
+
+            let hstatic = match GetDlgItem(hwnd, 101) {
+                Ok(h) if !h.is_invalid() => h,
+                _ => { return TRUE.0 as isize; }
+            };
+
+            let mut rc_static: RECT = std::mem::zeroed();
+            let _ = GetWindowRect(hstatic, &mut rc_static);
+
+            let mut text_buf = [0u16; 4096];
+            let len = GetWindowTextW(hstatic, &mut text_buf);
+            let text_len = len as usize;
+
+            let hdc = Gdi::GetDC(hwnd);
+            if hdc.is_invalid() {
+                return TRUE.0 as isize;
+            }
+
+            let hfont_lresult = SendMessageW(hstatic, WM_GETFONT, WPARAM(0), LPARAM(0));
+            let hfont_old = if hfont_lresult.0 != 0 {
+                let hfont = Gdi::HFONT(hfont_lresult.0 as *mut _);
+                Some(Gdi::SelectObject(hdc, Gdi::HGDIOBJ(hfont.0)))
+            } else {
+                None
+            };
+
+            let mut rc_calc: RECT = std::mem::zeroed();
+            rc_calc.right = rc_static.right - rc_static.left;
+            let dt_flags = Gdi::DT_WORDBREAK | Gdi::DT_CALCRECT | Gdi::DT_NOPREFIX;
+            Gdi::DrawTextW(hdc, &mut text_buf[..text_len], &mut rc_calc, dt_flags);
+
+            if let Some(old) = hfont_old {
+                Gdi::SelectObject(hdc, old);
+            }
+            let _ = Gdi::ReleaseDC(hwnd, hdc);
+
+            let ideal_text_h = (rc_calc.bottom - rc_calc.top) as i32;
+            let current_text_h = (rc_static.bottom - rc_static.top) as i32;
+            let extra = (ideal_text_h - current_text_h).max(0);
+
+            if extra > 0 {
+                let margin_x: i32 = 14;
+                let gap_text_edit: i32 = 7;
+                let edit_h: i32 = 22;
+                let gap_edit_btn: i32 = 7;
+                let btn_h: i32 = 24;
+                let margin_bottom: i32 = 7;
+                let new_cy = margin_x + ideal_text_h + gap_text_edit + edit_h + gap_edit_btn + btn_h + margin_bottom;
+
+                let mut rc_dlg: RECT = std::mem::zeroed();
+                rc_dlg.right = 250;
+                rc_dlg.bottom = new_cy;
+                let _ = MapDialogRect(hwnd, &mut rc_dlg);
+
+                let mut rc_win: RECT = std::mem::zeroed();
+                let _ = GetWindowRect(hwnd, &mut rc_win);
+                let cur_w = rc_win.right - rc_win.left;
+
+                let _ = SetWindowPos(hwnd, HWND::default(), 0, 0, cur_w, rc_dlg.bottom, SWP_NOMOVE | SWP_NOZORDER);
+
+                let mut rc_s: RECT = std::mem::zeroed();
+                let _ = GetWindowRect(hstatic, &mut rc_s);
+                let _ = SetWindowPos(hstatic, HWND::default(), 0, 0,
+                    rc_s.right - rc_s.left, rc_s.bottom - rc_s.top + extra,
+                    SWP_NOMOVE | SWP_NOZORDER);
+
+                if let Ok(hedit) = GetDlgItem(hwnd, 102) {
+                    if !hedit.is_invalid() {
+                        let mut rc_e: RECT = std::mem::zeroed();
+                        let _ = GetWindowRect(hedit, &mut rc_e);
+                        let _ = SetWindowPos(hedit, HWND::default(),
+                            rc_e.left - rc_win.left, rc_e.top - rc_win.top + extra,
+                            0, 0, SWP_NOSIZE | SWP_NOZORDER);
+                    }
+                }
+
+                for id in [103i32, 104i32] {
+                    if let Ok(hbtn) = GetDlgItem(hwnd, id) {
+                        if !hbtn.is_invalid() {
+                            let mut rc_b: RECT = std::mem::zeroed();
+                            let _ = GetWindowRect(hbtn, &mut rc_b);
+                            let _ = SetWindowPos(hbtn, HWND::default(),
+                                rc_b.left - rc_win.left, rc_b.top - rc_win.top + extra,
+                                0, 0, SWP_NOSIZE | SWP_NOZORDER);
+                        }
+                    }
+                }
+
+                let mut rc_new: RECT = std::mem::zeroed();
+                let _ = GetWindowRect(hwnd, &mut rc_new);
+                let w = rc_new.right - rc_new.left;
+                let h = rc_new.bottom - rc_new.top;
+                let cx_screen = GetSystemMetrics(SM_CXSCREEN);
+                let cy_screen = GetSystemMetrics(SM_CYSCREEN);
+                let _ = SetWindowPos(hwnd, HWND::default(),
+                    (cx_screen - w) / 2, (cy_screen - h) / 2,
+                    w, h, SWP_NOZORDER | SWP_FRAMECHANGED);
+            }
+
             TRUE.0 as isize
         }
         WM_COMMAND => {
@@ -641,12 +768,7 @@ fn prompt_stdout(title: &str, message: &str) -> Result<PromptResult> {
 
 pub fn run_dialog_helper(dialog_type: &str, title: &str, message: &str) -> Result<()> {
     #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::System::Console::FreeConsole;
-        unsafe {
-            let _ = FreeConsole();
-        }
-    }
+    init_visual_styles();
 
     match dialog_type {
         "notify" => {

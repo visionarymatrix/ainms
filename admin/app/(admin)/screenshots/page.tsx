@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -51,40 +52,15 @@ import {
   type ScreenshotRequest,
 } from "@/lib/api/employees";
 import { useSocket } from "@/lib/socket";
+import { timeAgo } from "@/lib/utils/format";
+import { getScreenshotStatusBadgeVariant } from "@/lib/utils/badges";
 
 interface EnrichedScreenshot extends ScreenshotRequest {
   device: Device;
   employee: Employee;
 }
 
-function timeAgo(dateStr: string | null): string {
-  if (!dateStr) return "Never";
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMin = Math.floor(diffMs / 60000);
-  if (diffMin < 1) return "just now";
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDay = Math.floor(diffHr / 24);
-  return `${diffDay}d ago`;
-}
 
-function getStatusBadgeVariant(
-  status: string
-): "default" | "secondary" | "destructive" | "outline" {
-  switch (status) {
-    case "completed":
-      return "default";
-    case "pending":
-      return "secondary";
-    case "failed":
-      return "destructive";
-    default:
-      return "outline";
-  }
-}
 
 function getStatusLabel(status: string): string {
   switch (status) {
@@ -423,7 +399,7 @@ export default function ScreenshotsPage() {
                             </TooltipContent>
                           </Tooltip>
                           <Badge
-                            variant={getStatusBadgeVariant(ss.status)}
+                            variant={getScreenshotStatusBadgeVariant(ss.status)}
                             className="text-[10px] px-1.5 py-0.5 shrink-0"
                           >
                             {getStatusLabel(ss.status)}
@@ -431,9 +407,9 @@ export default function ScreenshotsPage() {
                         </div>
 
                         <div className="flex items-center justify-between text-xs text-muted-foreground">
-                          <span className="truncate">
+                          <Link href={`/employees/${ss.employee.id}`} className="truncate hover:underline text-blue-600">
                             {ss.employee.first_name} {ss.employee.last_name}
-                          </span>
+                          </Link>
                           <span className="shrink-0">{timeAgo(ss.created_at)}</span>
                         </div>
                       </div>
@@ -473,8 +449,11 @@ export default function ScreenshotsPage() {
                     {viewingScreenshot && (
                       <>
                         {viewingScreenshot.device.hostname || "Unnamed Device"} ·{" "}
-                        {viewingScreenshot.employee.first_name}{" "}
-                        {viewingScreenshot.employee.last_name} ·{" "}
+                        <Link href={`/employees/${viewingScreenshot.employee.id}`} className="text-blue-600 hover:underline">
+                          {viewingScreenshot.employee.first_name}{" "}
+                          {viewingScreenshot.employee.last_name}
+                        </Link>{" "}
+                        ·{" "}
                         {new Date(
                           viewingScreenshot.created_at
                         ).toLocaleString()}

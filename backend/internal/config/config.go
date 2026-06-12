@@ -8,11 +8,13 @@ import (
 
 // Config holds all configuration for the API gateway.
 type Config struct {
-	Server   ServerConfig
-	Postgres PostgresConfig
+	Server     ServerConfig
+	Postgres   PostgresConfig
 	ClickHouse ClickHouseConfig
-	Redis    RedisConfig
-	MinIO    MinIOConfig
+	Redis      RedisConfig
+	MinIO      MinIOConfig
+	Ollama     OllamaConfig
+	UploadDir  string
 }
 
 // ServerConfig holds HTTP server configuration.
@@ -57,6 +59,14 @@ type MinIOConfig struct {
 	Secure    bool
 }
 
+// OllamaConfig holds Ollama Cloud API configuration.
+type OllamaConfig struct {
+	BaseURL string
+	APIKey  string
+	Model   string
+	Timeout int
+}
+
 // Load returns a Config populated from environment variables with sensible defaults.
 func Load() (*Config, error) {
 	cfg := &Config{
@@ -92,6 +102,13 @@ func Load() (*Config, error) {
 			Bucket:    getEnv("MINIO_BUCKET", "ainms-screenshots"),
 			Secure:    getEnvBool("MINIO_SECURE", false),
 		},
+		Ollama: OllamaConfig{
+			BaseURL: getEnv("OLLAMA_BASE_URL", "https://ollama.com/api"),
+			APIKey:  getEnv("OLLAMA_API_KEY", ""),
+			Model:   getEnv("OLLAMA_MODEL", "gemma4:31b-cloud"),
+			Timeout: getEnvInt("OLLAMA_TIMEOUT", 60),
+		},
+		UploadDir: getEnv("UPLOAD_DIR", "public/screenshots"),
 	}
 
 	return cfg, nil

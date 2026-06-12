@@ -58,4 +58,13 @@ miniodata/
 
 # Temporary files
 tmp/
-start-admin.shAGENTS.md
+start-admin.sh
+
+# Agent / Tool telemetry
+.omo/
+.playwright-mcp/
+.antigravitycli/
+graphify-out/cache/ast/
+*.png
+*.gguf
+.gemini/

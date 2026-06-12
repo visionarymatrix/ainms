@@ -56,6 +56,9 @@ pub enum MlError {
 
     #[error("Maximum agent iterations reached")]
     MaxIterationsReached,
+
+    #[error("Tool search error: {0}")]
+    ToolSearch(String),
 }
 
 pub type MlResult<T> = Result<T, MlError>;

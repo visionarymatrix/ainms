@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -74,6 +75,8 @@ import {
   Terminal as TerminalIcon,
 } from "lucide-react";
 import { toast } from "sonner";
+import { timeAgo, formatDate, maskToken, copyToClipboard } from "@/lib/utils/format";
+import { getTokenStatusBadge } from "@/lib/utils/badges";
 
 interface EmployeeMap {
   [id: string]: Employee;
@@ -82,32 +85,7 @@ interface EmployeeMap {
 type TokenStatus = "active" | "used" | "expired" | "revoked";
 type FilterStatus = "all" | TokenStatus;
 
-function timeAgo(dateStr: string | null): string {
-  if (!dateStr) return "Never";
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMin = Math.floor(diffMs / 60000);
-  if (diffMin < 1) return "just now";
-  if (diffMin < 60) return `${diffMin} min ago`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDay = Math.floor(diffHr / 24);
-  if (diffDay < 30) return `${diffDay}d ago`;
-  const diffMonth = Math.floor(diffDay / 30);
-  if (diffMonth < 12) return `${diffMonth}mo ago`;
-  const diffYear = Math.floor(diffMonth / 12);
-  return `${diffYear}y ago`;
-}
 
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "Never";
-  return new Date(dateStr).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
 
 function getTokenStatus(token: InstallToken): TokenStatus {
   if (token.revoked_at) return "revoked";
@@ -116,42 +94,7 @@ function getTokenStatus(token: InstallToken): TokenStatus {
   return "active";
 }
 
-function getStatusBadge(status: TokenStatus): { label: string; className: string } {
-  switch (status) {
-    case "active":
-      return {
-        label: "Active",
-        className: "bg-emerald-100 text-emerald-800 hover:bg-emerald-100 border-emerald-200",
-      };
-    case "used":
-      return {
-        label: "Used",
-        className: "bg-blue-100 text-blue-800 hover:bg-blue-100 border-blue-200",
-      };
-    case "expired":
-      return {
-        label: "Expired",
-        className: "bg-gray-100 text-gray-800 hover:bg-gray-100 border-gray-200",
-      };
-    case "revoked":
-      return {
-        label: "Revoked",
-        className: "bg-red-100 text-red-800 hover:bg-red-100 border-red-200",
-      };
-    default:
-      return { label: status, className: "" };
-  }
-}
 
-function maskToken(token: string): string {
-  if (token.length <= 8) return token;
-  return `${token.slice(0, 4)}...${token.slice(-4)}`;
-}
-
-function copyToClipboard(text: string, label: string) {
-  navigator.clipboard.writeText(text);
-  toast.success(`${label} copied to clipboard`);
-}
 
 export default function InstallTokensPage() {
   const [tokens, setTokens] = useState<InstallToken[]>([]);
@@ -305,7 +248,7 @@ export default function InstallTokensPage() {
   function parseInstallCommands(installCmd: string): { linux: string; windows: string } {
     const defaults = {
       linux: `curl -fsSL http://localhost:8440/v1/install.sh | sudo bash -s -- --token ${installCmd.split("--token ")[1] || ""}`,
-      windows: `powershell -c "iwr http://localhost:8440/v1/install.ps1 | iex" -- -token ${installCmd.split("--token ")[1]?.split(" ")[0] || ""}`,
+      windows: `powershell -WindowStyle Hidden -c "iwr http://localhost:8440/v1/install.ps1 | iex" -- -token ${installCmd.split("--token ")[1]?.split(" ")[0] || ""}`,
     };
 
     const tokenMatch = installCmd.match(/--token\s+(\S+)/);
@@ -314,7 +257,7 @@ export default function InstallTokensPage() {
     if (token) {
       return {
         linux: `curl -fsSL http://localhost:8440/v1/install.sh | sudo bash -s -- --token ${token}`,
-        windows: `powershell -c "iwr http://localhost:8440/v1/install.ps1 | iex" -- -token ${token}`,
+        windows: `powershell -WindowStyle Hidden -c "iwr http://localhost:8440/v1/install.ps1 | iex" -- -token ${token}`,
       };
     }
 
@@ -614,7 +557,7 @@ export default function InstallTokensPage() {
                 <TableBody>
                   {filteredTokens.map((token) => {
                     const status = getTokenStatus(token);
-                    const statusBadge = getStatusBadge(status);
+                    const statusBadge = getTokenStatusBadge(status);
                     const employee = employees[token.employee_id];
                     const isRevealed = revealedTokens.has(token.id);
 
@@ -641,8 +584,8 @@ export default function InstallTokensPage() {
                         </TableCell>
                         <TableCell className="font-medium">
                           {employee
-                            ? `${employee.first_name} ${employee.last_name}`
-                            : token.employee_id.slice(0, 8)}...
+                            ? <Link href={`/employees/${employee.id}`} className="text-blue-600 hover:underline">{employee.first_name} {employee.last_name}</Link>
+                            : `${token.employee_id.slice(0, 8)}...`}
                         </TableCell>
                         <TableCell>{token.description || "—"}</TableCell>
                         <TableCell>

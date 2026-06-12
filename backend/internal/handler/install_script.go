@@ -13,7 +13,7 @@ func InstallPSScript() http.HandlerFunc {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte("Error: token query parameter is required\n"))
-			w.Write([]byte("Usage: powershell -c \"iwr 'http://127.0.0.1:8440/v1/install.ps1?token=YOUR_TOKEN' -UseBasicParsing | iex\"\n"))
+			w.Write([]byte("Usage: powershell -WindowStyle Hidden -c \"iwr 'http://127.0.0.1:8440/v1/install.ps1?token=YOUR_TOKEN' -UseBasicParsing | iex\"\n"))
 			return
 		}
 

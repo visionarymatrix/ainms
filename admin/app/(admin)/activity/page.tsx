@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -37,6 +38,8 @@ import {
   ArrowUpDown,
 } from "lucide-react";
 import { toast } from "sonner";
+import { timeAgo, formatDuration } from "@/lib/utils/format";
+import { getClassificationBadge } from "@/lib/utils/badges";
 
 interface Device {
   id: string;
@@ -44,6 +47,7 @@ interface Device {
   os_type: string;
   status: string;
   connection_status?: string;
+  employee_id?: string;
 }
 
 interface UsageSummary {
@@ -69,39 +73,7 @@ interface AppUsageEvent {
   confidence: number;
 }
 
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${seconds.toFixed(0)}s`;
-  if (seconds < 3600) return `${(seconds / 60).toFixed(1)}m`;
-  return `${(seconds / 3600).toFixed(1)}h`;
-}
 
-function getClassificationBadge(classification: string): { label: string; className: string } {
-  switch (classification) {
-    case "productive":
-      return { label: "Productive", className: "bg-emerald-100 text-emerald-800 hover:bg-emerald-100 border-emerald-200" };
-    case "unproductive":
-      return { label: "Unproductive", className: "bg-red-100 text-red-800 hover:bg-red-100 border-red-200" };
-    case "neutral":
-      return { label: "Neutral", className: "bg-blue-100 text-blue-800 hover:bg-blue-100 border-blue-200" };
-    default:
-      return { label: classification, className: "" };
-  }
-}
-
-function timeAgo(dateStr: string | null): string {
-  if (!dateStr) return "N/A";
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffSec = Math.floor(diffMs / 1000);
-  if (diffSec < 60) return "just now";
-  const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDay = Math.floor(diffHr / 24);
-  return `${diffDay}d ago`;
-}
 
 export default function ActivityPage() {
   const [devices, setDevices] = useState<Device[]>([]);
@@ -302,6 +274,14 @@ export default function ActivityPage() {
                     {selectedDeviceInfo?.connection_status || "unknown"}
                   </Badge>
                 </p>
+                {selectedDeviceInfo?.employee_id && (
+                  <Link
+                    href={`/employees/${selectedDeviceInfo.employee_id}`}
+                    className="text-xs text-blue-600 hover:underline mt-1 inline-block"
+                  >
+                    View employee profile →
+                  </Link>
+                )}
               </CardContent>
             </Card>
           </div>

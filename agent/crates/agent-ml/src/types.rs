@@ -217,12 +217,27 @@ pub struct ChatGenerateOptions {
     pub seed: Option<u64>,
     pub tools: Vec<ToolDefinition>,
     pub parallel_tool_calls: bool,
+    /// "auto" = model decides, "required" = model MUST call a tool, "none" = no tools
+    pub tool_choice: String,
+}
+
+/// How the agent selects which tools to send to the LLM.
+#[derive(Debug, Clone)]
+pub enum ToolSelectionMode {
+    /// Send all registered tools every call (default, backward-compatible behavior).
+    All,
+    /// Use Tool Search: send only `search_tools` + always-visible tools initially,
+    /// then dynamically expand the tool set when `search_tools` is called.
+    Search {
+        /// Maximum number of tools to return per search query.
+        max_results: usize,
+    },
 }
 
 impl Default for ChatGenerateOptions {
     fn default() -> Self {
         Self {
-            max_tokens: 512,
+            max_tokens: 2048,
             temperature: 0.7,
             top_p: 0.95,
             top_k: 40,
@@ -230,6 +245,7 @@ impl Default for ChatGenerateOptions {
             seed: Some(42),
             tools: vec![],
             parallel_tool_calls: false,
+            tool_choice: "auto".to_string(),
         }
     }
 }

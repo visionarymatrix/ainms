@@ -32,12 +32,21 @@ func NewScreenshotService(sr *postgres.ScreenshotRepo, cr *postgres.CommandRepo,
 }
 
 func (s *ScreenshotService) RequestScreenshot(ctx context.Context, deviceID uuid.UUID, requestedBy uuid.UUID, reason string, policy string) (*domain.ScreenshotRequestDB, error) {
+	return s.requestScreenshot(ctx, deviceID, requestedBy, reason, policy, nil)
+}
+
+func (s *ScreenshotService) RequestTargetedScreenshot(ctx context.Context, deviceID uuid.UUID, requestedBy uuid.UUID, reason string, policy string, scheduleID uuid.UUID) (*domain.ScreenshotRequestDB, error) {
+	return s.requestScreenshot(ctx, deviceID, requestedBy, reason, policy, &scheduleID)
+}
+
+func (s *ScreenshotService) requestScreenshot(ctx context.Context, deviceID uuid.UUID, requestedBy uuid.UUID, reason string, policy string, scheduleID *uuid.UUID) (*domain.ScreenshotRequestDB, error) {
 	req := &domain.ScreenshotRequestDB{
 		DeviceID:    deviceID,
 		RequestedBy: requestedBy,
 		Reason:      reason,
 		Policy:      policy,
 		Status:      "pending",
+		ScheduleID:  scheduleID,
 	}
 
 	if err := s.screenshotRepo.Create(ctx, req); err != nil {
@@ -86,7 +95,22 @@ func (s *ScreenshotService) AcknowledgeCommand(ctx context.Context, commandID uu
 func (s *ScreenshotService) UploadScreenshot(ctx context.Context, requestID uuid.UUID, deviceID uuid.UUID, imageData []byte) (*domain.ScreenshotRequestDB, error) {
 	req, err := s.screenshotRepo.GetByID(ctx, requestID)
 	if err != nil {
-		return nil, fmt.Errorf("screenshot request not found: %w", err)
+		// Auto-upload: create the request record on the fly for agent-initiated screenshots
+		req = &domain.ScreenshotRequestDB{
+			DeviceID:    deviceID,
+			RequestedBy: uuid.Nil,
+			Reason:      "auto",
+			Policy:      "metadata_only",
+			Status:      "pending",
+		}
+		req.ID = requestID
+		if createErr := s.screenshotRepo.Create(ctx, req); createErr != nil {
+			return nil, fmt.Errorf("create auto screenshot request: %w", createErr)
+		}
+		req, err = s.screenshotRepo.GetByID(ctx, requestID)
+		if err != nil {
+			return nil, fmt.Errorf("screenshot request not found after create: %w", err)
+		}
 	}
 	if req.DeviceID != deviceID {
 		return nil, fmt.Errorf("device_id mismatch for screenshot request")
@@ -146,4 +170,49 @@ func (s *ScreenshotService) GetDeviceCompanyID(ctx context.Context, deviceID uui
 		return ""
 	}
 	return employee.CompanyID.String()
+}
+
+func (s *ScreenshotService) CleanupScreenshotImage(ctx context.Context, screenshotID uuid.UUID) error {
+	req, err := s.screenshotRepo.GetByID(ctx, screenshotID)
+	if err != nil {
+		return fmt.Errorf("screenshot not found for cleanup: %w", err)
+	}
+	if req.ImagePath == nil || *req.ImagePath == "" {
+		return nil
+	}
+
+	filePath := filepath.Join(s.uploadDir, *req.ImagePath)
+	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete screenshot file %s: %w", filePath, err)
+	}
+
+	if err := s.screenshotRepo.ClearImagePath(ctx, screenshotID); err != nil {
+		return fmt.Errorf("clear screenshot image_path: %w", err)
+	}
+
+	return nil
+}
+
+func (s *ScreenshotService) CleanupOldScreenshots(ctx context.Context, olderThanMinutes int) (int, error) {
+	screenshots, err := s.screenshotRepo.ListCompletedWithImages(ctx, olderThanMinutes)
+	if err != nil {
+		return 0, fmt.Errorf("list old screenshots: %w", err)
+	}
+
+	cleaned := 0
+	for _, sc := range screenshots {
+		if sc.ImagePath == nil || *sc.ImagePath == "" {
+			continue
+		}
+		filePath := filepath.Join(s.uploadDir, *sc.ImagePath)
+		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+			continue
+		}
+		if err := s.screenshotRepo.ClearImagePath(ctx, sc.ID); err != nil {
+			continue
+		}
+		cleaned++
+	}
+
+	return cleaned, nil
 }

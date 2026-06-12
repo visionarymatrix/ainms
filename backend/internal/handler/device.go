@@ -51,6 +51,17 @@ func EnrollDevice(svc *service.EnrollmentService) http.HandlerFunc {
 }
 
 func DeviceHeartbeat(svc *service.EnrollmentService) http.HandlerFunc {
+	type SystemInfoRequest struct {
+		Hostname     *string `json:"hostname"`
+		OSVersion    *string `json:"os_version"`
+		Fingerprint  *string `json:"fingerprint"`
+		CPUInfo      *string `json:"cpu_info"`
+		RAMInfo      *string `json:"ram_info"`
+		DiskInfo     *string `json:"disk_info"`
+		MACAddresses *string `json:"mac_addresses"`
+		IPAddresses  *string `json:"ip_addresses"`
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		deviceIDStr := chi.URLParam(r, "deviceID")
 		if deviceIDStr == "" {
@@ -59,13 +70,43 @@ func DeviceHeartbeat(svc *service.EnrollmentService) http.HandlerFunc {
 		}
 
 		var body struct {
-			AgentVersion string `json:"agent_version"`
+			AgentVersion string             `json:"agent_version"`
+			SystemInfo   *SystemInfoRequest `json:"system_info"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			body.AgentVersion = ""
 		}
 
-		if err := svc.Heartbeat(r.Context(), deviceIDStr, body.AgentVersion); err != nil {
+		var systemInfo map[string]interface{}
+		if body.SystemInfo != nil {
+			systemInfo = make(map[string]interface{})
+			if body.SystemInfo.Hostname != nil {
+				systemInfo["hostname"] = *body.SystemInfo.Hostname
+			}
+			if body.SystemInfo.OSVersion != nil {
+				systemInfo["os_version"] = *body.SystemInfo.OSVersion
+			}
+			if body.SystemInfo.Fingerprint != nil {
+				systemInfo["fingerprint"] = *body.SystemInfo.Fingerprint
+			}
+			if body.SystemInfo.CPUInfo != nil {
+				systemInfo["cpu_info"] = *body.SystemInfo.CPUInfo
+			}
+			if body.SystemInfo.RAMInfo != nil {
+				systemInfo["ram_info"] = *body.SystemInfo.RAMInfo
+			}
+			if body.SystemInfo.DiskInfo != nil {
+				systemInfo["disk_info"] = *body.SystemInfo.DiskInfo
+			}
+			if body.SystemInfo.MACAddresses != nil {
+				systemInfo["mac_addresses"] = *body.SystemInfo.MACAddresses
+			}
+			if body.SystemInfo.IPAddresses != nil {
+				systemInfo["ip_addresses"] = *body.SystemInfo.IPAddresses
+			}
+		}
+
+		if err := svc.Heartbeat(r.Context(), deviceIDStr, body.AgentVersion, systemInfo); err != nil {
 			var approvalErr *service.ApprovalError
 			if errors.As(err, &approvalErr) {
 				writeError(w, http.StatusForbidden, approvalErr.Message)

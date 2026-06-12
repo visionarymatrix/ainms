@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/ainms/gateway/internal/config"
 	"github.com/ainms/gateway/internal/handler"
 	"github.com/ainms/gateway/internal/middleware"
+	"github.com/ainms/gateway/internal/ollama"
 	"github.com/ainms/gateway/internal/repository/clickhouse"
 	"github.com/ainms/gateway/internal/repository/postgres"
 	"github.com/ainms/gateway/internal/service"
@@ -31,6 +33,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+
+	// Resolve upload directory to absolute path so it works regardless of working directory.
+	uploadDir, err := filepath.Abs(cfg.UploadDir)
+	if err != nil {
+		log.Fatalf("failed to resolve upload directory %q: %v", cfg.UploadDir, err)
+	}
+	log.Printf("upload directory: %s", uploadDir)
 
 	ctx := context.Background()
 
@@ -64,14 +73,24 @@ func main() {
 	alertRuleRepo := postgres.NewAlertRuleRepo(pgPool)
 	policyRepo := postgres.NewPolicyRepo(pgPool)
 	eventRepo := clickhouse.NewEventRepo(pgPool)
+	installedAppRepo := postgres.NewInstalledAppRepo(pgPool)
+	installedAppValidationRepo := postgres.NewInstalledAppValidationRepo(pgPool)
+	targetedScheduleRepo := postgres.NewTargetedScheduleRepo(pgPool)
+	projectRepo := postgres.NewProjectRepo(pgPool)
+	activityAnalysisRepo := postgres.NewActivityAnalysisRepo(pgPool)
 
 	companySvc := service.NewCompanyService(companyRepo)
 	employeeSvc := service.NewEmployeeService(employeeRepo)
 	enrollmentSvc := service.NewEnrollmentService(employeeRepo, deviceRepo, roleRepo, appClassificationRepo, alertRuleRepo, policyRepo)
 	installTokenSvc := service.NewInstallTokenService(installTokenRepo, employeeRepo)
 	authSvc := service.NewAuthService(userRepo, companyRepo, tenantRepo)
-	screenshotSvc := service.NewScreenshotService(screenshotRepo, commandRepo, deviceRepo, employeeRepo, "public/screenshots")
+	screenshotSvc := service.NewScreenshotService(screenshotRepo, commandRepo, deviceRepo, employeeRepo, uploadDir)
 	roleSvc := service.NewRoleService(roleRepo)
+	installedAppSvc := service.NewInstalledAppService(installedAppRepo, installedAppValidationRepo, deviceRepo, employeeRepo, appClassificationRepo, roleRepo)
+
+	ollamaClient := ollama.NewClient(cfg.Ollama.BaseURL, cfg.Ollama.APIKey, cfg.Ollama.Model, cfg.Ollama.Timeout)
+	complianceAlertRepo := postgres.NewComplianceAlertRepo(pgPool)
+	complianceSvc := service.NewComplianceService(complianceAlertRepo, screenshotRepo, screenshotSvc, deviceRepo, employeeRepo, eventRepo, activityAnalysisRepo, ollamaClient, uploadDir)
 
 	socketOpts := socketio.DefaultServerOptions()
 	socketOpts.SetCors(&types.Cors{
@@ -84,6 +103,8 @@ func main() {
 	sio := socketio.NewServer(nil, socketOpts)
 
 	socketHub := service.NewSocketHub(sio)
+	targetedScheduleSvc := service.NewTargetedScheduleService(targetedScheduleRepo, employeeRepo, deviceRepo, screenshotSvc, socketHub, screenshotRepo)
+	projectSvc := service.NewProjectService(projectRepo)
 
 	socketHandler := handler.NewSocketHandler(socketHub, installTokenSvc, authSvc, enrollmentSvc, screenshotSvc)
 	socketHandler.RegisterEvents(sio)
@@ -94,7 +115,7 @@ func main() {
 		log.Println("super admin seeded successfully")
 	}
 
-	if err := os.MkdirAll("public/screenshots", 0755); err != nil {
+	if err := os.MkdirAll(uploadDir, 0755); err != nil {
 		log.Printf("warning: failed to create screenshots directory: %v", err)
 	}
 
@@ -149,6 +170,8 @@ func main() {
 			r.Get("/employees/{employeeID}/devices", handler.GetEmployeeDevices(deviceRepo))
 			r.Post("/employees/{employeeID}/install-token", handler.GenerateEmployeeInstallToken(installTokenSvc, employeeSvc))
 			r.Get("/companies/{companyID}/employees", handler.ListEmployees(employeeSvc))
+			r.Get("/companies/{companyID}/validations", handler.GetCompanyValidations(installedAppSvc))
+			r.Get("/companies/{companyID}/non-compliant-apps", handler.GetCompanyNonCompliantApps(installedAppSvc))
 			r.Patch("/employees/{employeeID}", handler.UpdateEmployee(employeeSvc))
 			r.Delete("/employees/{employeeID}", handler.DeactivateEmployee(employeeSvc))
 			r.Post("/employees/{employeeID}/query", handler.PostNLQuery(employeeRepo, deviceRepo, socketHub))
@@ -164,26 +187,54 @@ func main() {
 			r.Post("/devices/{deviceID}/reject", handler.RejectDevice(enrollmentSvc))
 			r.Get("/devices/pending", handler.ListPendingDevices(enrollmentSvc))
 
-			r.Get("/rules/sync", handler.SyncRules(appClassificationRepo, alertRuleRepo, policyRepo, deviceRepo, employeeRepo, companyRepo))
+			r.Get("/rules/sync", handler.SyncRules(appClassificationRepo, alertRuleRepo, policyRepo, deviceRepo, employeeRepo, companyRepo, roleRepo))
 
 			r.Get("/models", handler.GetLLMModels())
 
 			r.Post("/events/bulk", handler.BulkEvents(eventRepo))
+			r.Post("/events/app-usage", handler.AppUsage(eventRepo))
 			r.Post("/events/priority", handler.PriorityEvent(eventRepo))
 			r.Post("/events/popup", handler.PopupEvent(eventRepo))
 			r.Post("/events/browser-tabs", handler.BrowserTabsEvent(eventRepo))
 			r.Post("/events/network", handler.NetworkTrafficEvent(eventRepo))
+			r.Post("/events/activity-summaries", handler.ActivitySummaries(eventRepo))
+			r.Post("/events/installed-apps", handler.UploadInstalledApps(installedAppSvc))
+			r.Get("/events/installed-apps/{deviceID}", handler.GetDeviceInstalledApps(installedAppRepo))
 
 			r.Get("/devices/{deviceID}/usage-summaries", handler.GetDeviceUsageSummaries(eventRepo))
+			r.Get("/devices/{deviceID}/app-usage", handler.GetDeviceAppUsageByDate(eventRepo))
 			r.Get("/devices/{deviceID}/events", handler.GetDeviceEvents(eventRepo))
+			r.Get("/devices/{deviceID}/activity-summaries", handler.GetDeviceActivitySummaries(eventRepo))
+			r.Get("/devices/{deviceID}/installed-apps", handler.GetDeviceInstalledApps(installedAppRepo))
+			r.Get("/employees/{employeeID}/installed-apps", handler.GetEmployeeInstalledApps(installedAppRepo))
+
+			// Installed app validation results
+			r.Get("/devices/{deviceID}/validations", handler.GetDeviceValidations(installedAppSvc))
+			r.Get("/employees/{employeeID}/validations", handler.GetEmployeeValidations(installedAppSvc))
 
 			r.Get("/devices/status", handler.DeviceFleetStatus(enrollmentSvc))
 
 			// Screenshot: admin requests, agent uploads, admin views
 			r.Post("/screenshot/request", handler.RequestScreenshot(screenshotSvc, socketHub))
-			r.Post("/screenshot/upload", handler.UploadScreenshot(screenshotSvc, socketHub))
+			r.Post("/screenshot/upload", handler.UploadScreenshot(screenshotSvc, socketHub, complianceSvc))
+			r.Post("/screenshot/batch-upload", handler.BatchUploadScreenshots(screenshotSvc, socketHub, complianceSvc))
+
+			r.Get("/devices/{deviceID}/alerts", handler.GetDeviceAlerts(complianceSvc))
+			r.Post("/alerts/{alertID}/ack", handler.AckAlert(complianceSvc))
+			r.Get("/companies/{companyID}/alerts", handler.ListCompanyAlerts(complianceSvc))
+			r.Get("/employees/{employeeID}/alerts", handler.ListEmployeeAlerts(complianceSvc))
 			r.Get("/devices/{deviceID}/screenshots", handler.GetDeviceScreenshots(screenshotSvc))
 			r.Get("/screenshots/{requestID}/image", handler.GetScreenshotImage(screenshotSvc))
+
+			// Targeted screenshot schedules
+			r.Post("/targeted-schedules", handler.CreateTargetedSchedule(targetedScheduleSvc))
+			r.Get("/targeted-schedules", handler.ListTargetedSchedules(targetedScheduleSvc))
+			r.Get("/targeted-schedules/{scheduleID}", handler.GetTargetedSchedule(targetedScheduleSvc))
+			r.Put("/targeted-schedules/{scheduleID}", handler.UpdateTargetedSchedule(targetedScheduleSvc))
+			r.Delete("/targeted-schedules/{scheduleID}", handler.DeleteTargetedSchedule(targetedScheduleSvc))
+			r.Get("/targeted-screenshots", handler.GetTargetedScreenshots(targetedScheduleSvc))
+			r.Get("/targeted-schedules/{scheduleID}/screenshots", handler.GetScheduleScreenshots(targetedScheduleSvc))
+			r.Get("/employees/{employeeID}/targeted-schedules", handler.ListTargetedSchedulesByEmployee(targetedScheduleSvc))
 
 			// Agent commands: agent polls for pending commands
 			r.Get("/devices/{deviceID}/commands", handler.GetPendingCommands(screenshotSvc))
@@ -205,6 +256,17 @@ func main() {
 			r.Get("/roles/{roleID}/alert-rules", handler.ListAlertRules(alertRuleRepo))
 			r.Post("/roles/{roleID}/alert-rules", handler.CreateAlertRule(alertRuleRepo))
 			r.Delete("/roles/{roleID}/alert-rules/{ruleID}", handler.DeleteAlertRule(alertRuleRepo))
+
+			// Project CRUD
+			r.Post("/projects", handler.CreateProject(projectSvc))
+			r.Get("/projects", handler.ListProjects(projectSvc))
+			r.Get("/projects/{projectID}", handler.GetProject(projectSvc))
+			r.Put("/projects/{projectID}", handler.UpdateProject(projectSvc))
+			r.Delete("/projects/{projectID}", handler.DeleteProject(projectSvc))
+			r.Post("/projects/{projectID}/assignments", handler.AssignEmployeeToProject(projectSvc))
+			r.Delete("/projects/{projectID}/assignments/{employeeID}", handler.UnassignEmployeeFromProject(projectSvc))
+			r.Get("/employees/{employeeID}/projects", handler.ListEmployeeProjects(projectSvc))
+			r.Get("/employees/{employeeID}/ai-activity", handler.GetAIActivityAnalysis(complianceSvc, projectSvc))
 		})
 	})
 
@@ -231,6 +293,25 @@ func main() {
 			log.Fatalf("server error: %v", err)
 		}
 	}()
+
+	// Periodic screenshot image cleanup: every 30 minutes, delete image files
+	// for screenshots that were analyzed more than 1 hour ago.
+		go func() {
+		ticker := time.NewTicker(30 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			cleaned, err := screenshotSvc.CleanupOldScreenshots(context.Background(), 60)
+			if err != nil {
+				log.Printf("[cleanup] screenshot cleanup error: %v", err)
+			} else if cleaned > 0 {
+				log.Printf("[cleanup] removed %d old screenshot images", cleaned)
+			}
+		}
+	}()
+
+	schedulerCancelCtx, schedulerCancel := context.WithCancel(ctx)
+	defer schedulerCancel()
+	targetedScheduleSvc.StartScheduler(schedulerCancelCtx)
 
 	<-done
 	log.Println("shutting down...")

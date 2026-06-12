@@ -88,7 +88,7 @@ pub struct RoleInfo {
     pub blocked_categories: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RulesInfo {
     #[serde(default)]
     pub app_classifications: Vec<AppClassificationRule>,
@@ -96,7 +96,7 @@ pub struct RulesInfo {
     pub alert_rules: Vec<AlertRuleInfo>,
     #[serde(default)]
     pub policy: PolicyInfo,
-    #[serde(default)]
+    #[serde(default, rename = "role_info")]
     pub role: Option<RoleInfo>,
 }
 
@@ -144,6 +144,23 @@ pub struct BulkEventRequest {
     pub device_id: String,
     pub summary: AppUsageSummary,
     pub metadata: Vec<AppUsageEventMeta>,
+}
+
+// ── Aggregated daily app usage update ──────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppUsageUpdate {
+    pub device_id: String,
+    pub apps: Vec<AppUsageEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppUsageEntry {
+    pub app_name: String,
+    pub duration_sec: f64,
+    pub open_count: u64,
+    pub classification: String,
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,4 +313,62 @@ pub struct BrowserTabInfo {
 pub struct BulkBrowserTabRequest {
     pub device_id: String,
     pub tabs: Vec<BrowserTabInfo>,
+}
+
+// ── Activity summary events (5-min buffer AI-generated) ────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivitySummary {
+    pub device_id: String,
+    pub timestamp: DateTime<Utc>,
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    pub summary_text: String,
+    pub top_apps: Vec<String>,
+    pub screenshot_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkActivitySummaryRequest {
+    pub device_id: String,
+    pub summaries: Vec<ActivitySummary>,
+}
+
+// ── Digital profile (per-role app classification) ────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigitalProfileEntry {
+    pub app_name: String,
+    pub display_name: Option<String>,
+    pub role_name: String,
+    pub category: String,
+    pub confidence: f64,
+    pub source: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+// ── Installed apps upload ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstalledAppEntry {
+    pub app_name: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub publisher: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_path: Option<String>,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub confidence: f64,
+    #[serde(default)]
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstalledAppsUploadRequest {
+    pub device_id: String,
+    pub apps: Vec<InstalledAppEntry>,
 }

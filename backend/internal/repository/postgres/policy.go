@@ -37,7 +37,7 @@ func (r *PolicyRepo) GetDefault(ctx context.Context) (*domain.Policy, error) {
 		ID:                uuid.Nil,
 		TenantID:          uuid.Nil,
 		UploadInterval:    300,
-		ScreenshotEnabled: false,
+		ScreenshotEnabled: true,
 		ScreenshotPolicy:  "metadata_only",
 	}, nil
 }

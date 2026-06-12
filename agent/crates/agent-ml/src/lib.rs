@@ -28,6 +28,7 @@ pub mod config;
 pub mod error;
 pub mod mock;
 pub mod provider;
+pub mod tool_search;
 pub mod types;
 
 #[cfg(feature = "llama-cpp")]

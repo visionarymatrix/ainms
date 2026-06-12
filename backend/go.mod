@@ -10,6 +10,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/redis/go-redis/v9 v9.19.0
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/zishang520/socket.io/servers/socket/v3 v3.0.3
 	github.com/zishang520/socket.io/v3 v3.0.3
 	golang.org/x/crypto v0.52.0

@@ -18,7 +18,7 @@ pub fn get_active_window() -> Option<ActiveWindow> {
         let mut pid: u32 = 0;
         let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
 
-        let process_name = get_process_name_by_pid(pid);
+        let process_name = crate::active_window::normalize_process_name(&get_process_name_by_pid(pid));
 
         Some(ActiveWindow {
             title,
@@ -116,8 +116,8 @@ pub fn get_all_running_applications() -> Vec<ProcessInfo> {
             let name = entry
                 .get("ProcessName")
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+                .map(crate::active_window::normalize_process_name)
+                .unwrap_or_default();
             let pid = entry
                 .get("Id")
                 .and_then(|v| v.as_i64())
@@ -219,7 +219,7 @@ fn get_process_name_map() -> std::collections::HashMap<u32, String> {
                 proc.get("Id").and_then(|v| v.as_i64()),
                 proc.get("ProcessName").and_then(|v| v.as_str()),
             ) {
-                map.insert(id as u32, name.to_string());
+                map.insert(id as u32, crate::active_window::normalize_process_name(name));
             }
         }
     }

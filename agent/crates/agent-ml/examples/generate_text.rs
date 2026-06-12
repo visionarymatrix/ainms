@@ -27,6 +27,7 @@ async fn main() {
 
     let config = agent_ml::llama_cpp::LlamaCppConfig {
         model_path: PathBuf::from(model_path),
+        mmproj_path: None,
         n_ctx: 2048,
         n_threads: 4,
         n_gpu_layers: 99, // Offload all layers to GPU (set to 0 for CPU-only)

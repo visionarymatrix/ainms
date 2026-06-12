@@ -184,6 +184,13 @@ fn parse_screenshot_request(payload: Payload, tx: &mpsc::Sender<SocketCommand>) 
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
+        let schedule_id = payload
+            .get("schedule_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let Some(ref sid) = schedule_id {
+            info!(request_id = %req_id, schedule_id = %sid, "Received targeted screenshot request");
+        }
         SocketCommand::ScreenshotRequest {
             command_id: req_id,
             payload,

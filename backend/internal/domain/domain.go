@@ -182,17 +182,31 @@ type RuleSetResponse struct {
 type BulkEventRequest struct {
 	DeviceID string              `json:"device_id" validate:"required,uuid"`
 	Summary  AppUsageSummary      `json:"summary"`
-	Metadata []AppUsageEventMeta `json:"metadata" validate:"min=1"`
+	Metadata []AppUsageEventMeta  `json:"metadata" validate:"min=1"`
+}
+
+type AppUsageEntry struct {
+	AppName       string  `json:"app_name" validate:"required"`
+	DurationSec   float64 `json:"duration_sec"`
+	OpenCount     uint64  `json:"open_count"`
+	Classification string `json:"classification"`
+	Confidence    float64 `json:"confidence"`
+}
+
+type AppUsageUpdateRequest struct {
+	DeviceID string          `json:"device_id" validate:"required,uuid"`
+	Apps     []AppUsageEntry `json:"apps" validate:"min=1"`
 }
 
 type AppUsageSummary struct {
-	DeviceID            string  `json:"device_id"`
-	AppName             string  `json:"app_name"`
-	TotalDurationSec   float64 `json:"total_duration_sec"`
-	SessionCount        int     `json:"session_count"`
-	ProductiveDuration  float64 `json:"productive_duration_sec"`
-	UnproductiveDuration float64 `json:"unproductive_duration_sec"`
-	NeutralDuration     float64 `json:"neutral_duration_sec"`
+	DeviceID            string    `json:"device_id"`
+	AppName             string    `json:"app_name"`
+	Date                *string   `json:"date,omitempty"`
+	TotalDurationSec   float64   `json:"total_duration_sec"`
+	SessionCount        int       `json:"session_count"`
+	ProductiveDuration  float64   `json:"productive_duration_sec"`
+	UnproductiveDuration float64  `json:"unproductive_duration_sec"`
+	NeutralDuration     float64   `json:"neutral_duration_sec"`
 }
 
 type AppUsageEventMeta struct {
@@ -220,14 +234,16 @@ type PriorityEventRequest struct {
 }
 
 type PopupEvent struct {
-	DeviceID    uuid.UUID `json:"device_id" validate:"required"`
-	AppName     string    `json:"app_name" validate:"required"`
-	WindowTitle string    `json:"window_title"`
-	Explanation string    `json:"explanation" validate:"required"`
-	PopupType   string    `json:"popup_type" validate:"required,oneof=toast modal soft_block"`
-	Classification string `json:"classification"`
-	Confidence  float64   `json:"confidence"`
-	Timestamp   time.Time `json:"timestamp"`
+	DeviceID    uuid.UUID  `json:"device_id" validate:"required"`
+	AlertID     *uuid.UUID `json:"alert_id"`
+	Decision    string     `json:"decision"`
+	AppName     string     `json:"app_name"`
+	WindowTitle string     `json:"window_title"`
+	Explanation string     `json:"explanation" validate:"required"`
+	PopupType   string     `json:"popup_type" validate:"required,oneof=toast modal soft_block"`
+	Classification string  `json:"classification"`
+	Confidence  float64    `json:"confidence"`
+	Timestamp   time.Time  `json:"timestamp"`
 }
 
 type ScreenshotRequest struct {
@@ -254,8 +270,40 @@ type ScreenshotRequestDB struct {
 	Policy      string     `json:"policy" db:"policy"`
 	Status      string     `json:"status" db:"status"`
 	ImagePath   *string    `json:"image_path" db:"image_path"`
+	ScheduleID  *uuid.UUID `json:"schedule_id" db:"schedule_id"`
 	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
 	CompletedAt *time.Time `json:"completed_at" db:"completed_at"`
+}
+
+type TargetedScreenshotSchedule struct {
+	CompanyID      uuid.UUID  `json:"company_id" validate:"required,uuid"`
+	EmployeeID     uuid.UUID  `json:"employee_id" validate:"required,uuid"`
+	CreatedBy      uuid.UUID  `json:"created_by" validate:"required,uuid"`
+	Name           string     `json:"name"`
+	IntervalMinutes int       `json:"interval_minutes" validate:"required,min=1"`
+	StartTime      string     `json:"start_time" validate:"required"` // HH:MM
+	EndTime        string     `json:"end_time" validate:"required"`   // HH:MM
+	StartDate      time.Time  `json:"start_date" validate:"required"`
+	EndDate        time.Time  `json:"end_date" validate:"required"`
+	Status         string     `json:"status" validate:"required,oneof=active paused expired"`
+}
+
+type TargetedScreenshotScheduleDB struct {
+	ID               uuid.UUID  `json:"id" db:"id"`
+	CompanyID        uuid.UUID  `json:"company_id" db:"company_id"`
+	EmployeeID       uuid.UUID  `json:"employee_id" db:"employee_id"`
+	CreatedBy        uuid.UUID  `json:"created_by" db:"created_by"`
+	Name             string     `json:"name" db:"name"`
+	IntervalMinutes  int        `json:"interval_minutes" db:"interval_minutes"`
+	CronExpression   *string    `json:"cron_expression,omitempty" db:"cron_expression"`
+	StartTime        string     `json:"start_time" db:"start_time"`
+	EndTime          string     `json:"end_time" db:"end_time"`
+	StartDate        time.Time  `json:"start_date" db:"start_date"`
+	EndDate          time.Time  `json:"end_date" db:"end_date"`
+	Status           string     `json:"status" db:"status"`
+	LastTriggeredAt  *time.Time `json:"last_triggered_at" db:"last_triggered_at"`
+	CreatedAt        time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at" db:"updated_at"`
 }
 
 type PendingCommandDB struct {
@@ -361,4 +409,190 @@ type JSONMap map[string]interface{}
 // GenerateEmployeeID creates a sequential employee ID in the format EMP-XXXX.
 func GenerateEmployeeID(sequence int) string {
 	return fmt.Sprintf("EMP-%04d", sequence)
+}
+
+// ActivitySummary represents an AI-generated summary of a 5-minute activity window
+type ActivitySummary struct {
+	ID              uuid.UUID `json:"id" db:"id"`
+	DeviceID        uuid.UUID `json:"device_id" db:"device_id"`
+	WindowStart     time.Time `json:"window_start" db:"window_start"`
+	WindowEnd       time.Time `json:"window_end" db:"window_end"`
+	SummaryText     string    `json:"summary_text" db:"summary_text"`
+	TopApps         []string  `json:"top_apps" db:"top_apps"`
+	ScreenshotCount int       `json:"screenshot_count" db:"screenshot_count"`
+	CreatedAt       time.Time `json:"created_at" db:"created_at"`
+}
+
+// BulkActivitySummaryRequest is the payload for batch activity summary uploads
+type BulkActivitySummaryRequest struct {
+	DeviceID  string            `json:"device_id" validate:"required"`
+	Summaries []ActivitySummary `json:"summaries" validate:"min=1"`
+}
+
+// InstalledApp represents a single installed application on a device.
+type InstalledApp struct {
+	ID          uuid.UUID  `json:"id" db:"id"`
+	DeviceID    uuid.UUID  `json:"device_id" db:"device_id"`
+	AppName     string     `json:"app_name" db:"app_name"`
+	DisplayName string     `json:"display_name" db:"display_name"`
+	Publisher   string     `json:"publisher" db:"publisher"`
+	InstallPath *string    `json:"install_path" db:"install_path"`
+	Category    string     `json:"category" db:"category"`
+	Confidence  float64    `json:"confidence" db:"confidence"`
+	Source      string     `json:"source" db:"source"`
+	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at" db:"updated_at"`
+}
+
+// InstalledAppEntry is a single app entry in an upload request from the agent.
+type InstalledAppEntry struct {
+	AppName     string  `json:"app_name" validate:"required"`
+	DisplayName string  `json:"display_name"`
+	Publisher   string  `json:"publisher"`
+	InstallPath *string `json:"install_path,omitempty"`
+	Category    string  `json:"category"`
+	Confidence  float64 `json:"confidence"`
+	Source      string  `json:"source"`
+}
+
+// InstalledAppsUploadRequest is the payload for uploading installed apps from an agent.
+type InstalledAppsUploadRequest struct {
+	DeviceID string             `json:"device_id" validate:"required,uuid"`
+	Apps     []InstalledAppEntry `json:"apps" validate:"min=1"`
+}
+
+// InstalledAppWithDevice extends InstalledApp with device/employee info for admin queries.
+type InstalledAppWithDevice struct {
+	InstalledApp
+	DeviceIDStr   string  `json:"device_id"`
+	DeviceHostname *string `json:"device_hostname"`
+	EmployeeID    string  `json:"employee_id"`
+	EmployeeName  string  `json:"employee_name"`
+}
+
+// ComplianceAlert represents an AI-generated compliance decision for a screenshot.
+type ComplianceAlert struct {
+	ID           uuid.UUID  `json:"id" db:"id"`
+	DeviceID     uuid.UUID  `json:"device_id" db:"device_id"`
+	EmployeeID   uuid.UUID  `json:"employee_id" db:"employee_id"`
+	ScreenshotID *uuid.UUID `json:"screenshot_id,omitempty" db:"screenshot_id"`
+	Decision     string     `json:"decision" db:"decision"`
+	Message      string     `json:"message" db:"message"`
+	ModelUsed    string     `json:"model_used" db:"model_used"`
+	RawResponse  *string    `json:"raw_response,omitempty" db:"raw_response"`
+	Status       string     `json:"status" db:"status"`
+	CreatedAt    time.Time  `json:"created_at" db:"created_at"`
+	DeliveredAt  *time.Time `json:"delivered_at,omitempty" db:"delivered_at"`
+	AckedAt      *time.Time `json:"acked_at,omitempty" db:"acked_at"`
+}
+
+type InstalledAppValidation struct {
+	ID               uuid.UUID  `json:"id" db:"id"`
+	DeviceID         uuid.UUID  `json:"device_id" db:"device_id"`
+	AppName          string     `json:"app_name" db:"app_name"`
+	RoleID           *uuid.UUID `json:"role_id,omitempty" db:"role_id"`
+	DisplayName      string     `json:"display_name" db:"display_name"`
+	AgentCategory    string     `json:"agent_category" db:"agent_category"`
+	ValidatedCategory string    `json:"validated_category" db:"validated_category"`
+	IsCompliant      bool       `json:"is_compliant" db:"is_compliant"`
+	Reason           string     `json:"reason" db:"reason"`
+	ValidatedAt      time.Time  `json:"validated_at" db:"validated_at"`
+	CreatedAt        time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at" db:"updated_at"`
+}
+
+type ComplianceAlertWithDetails struct {
+	ComplianceAlert
+	EmployeeName   string        `json:"employee_name"`
+	DeviceHostname string        `json:"device_hostname"`
+	PopupAnswer    *PopupEventDB `json:"popup_answer,omitempty"`
+}
+
+type PopupEventDB struct {
+	ID             uuid.UUID  `json:"id" db:"id"`
+	DeviceID       uuid.UUID  `json:"device_id" db:"device_id"`
+	AlertID        *uuid.UUID `json:"alert_id" db:"alert_id"`
+	Decision       string     `json:"decision" db:"decision"`
+	AppName        string     `json:"app_name" db:"app_name"`
+	WindowTitle    string     `json:"window_title" db:"window_title"`
+	Explanation    string     `json:"explanation" db:"explanation"`
+	PopupType      string     `json:"popup_type" db:"popup_type"`
+	Classification string     `json:"classification" db:"classification"`
+	Confidence     float64    `json:"confidence" db:"confidence"`
+	EventTime      time.Time  `json:"event_time" db:"event_time"`
+	CreatedAt      time.Time  `json:"created_at" db:"created_at"`
+}
+
+type InstalledAppValidationWithDetails struct {
+	InstalledAppValidation
+	DeviceHostname string `json:"device_hostname"`
+	EmployeeID     string `json:"employee_id"`
+	EmployeeName   string `json:"employee_name"`
+	RoleName       string `json:"role_name,omitempty"`
+}
+
+// ── Project & Assignments ────────────────────────────────────────────────────
+
+type Project struct {
+	ID          uuid.UUID `json:"id" db:"id"`
+	CompanyID   uuid.UUID `json:"company_id" db:"company_id"`
+	Name        string    `json:"name" db:"name"`
+	Description *string   `json:"description,omitempty" db:"description"`
+	Status      string    `json:"status" db:"status"`
+	WorkingApps []string  `json:"working_apps" db:"working_apps"`
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
+}
+
+type EmployeeProjectAssignment struct {
+	ID         uuid.UUID  `json:"id" db:"id"`
+	EmployeeID uuid.UUID  `json:"employee_id" db:"employee_id"`
+	ProjectID  uuid.UUID  `json:"project_id" db:"project_id"`
+	AssignedBy uuid.UUID  `json:"assigned_by" db:"assigned_by"`
+	StartedAt  time.Time  `json:"started_at" db:"started_at"`
+	EndedAt    *time.Time `json:"ended_at,omitempty" db:"ended_at"`
+	IsPrimary  bool       `json:"is_primary" db:"is_primary"`
+	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at" db:"updated_at"`
+}
+
+// ── AI Activity Analysis ─────────────────────────────────────────────────────
+
+type ActivityAnalysisRequest struct {
+	EmployeeID string    `json:"employee_id" validate:"required,uuid"`
+	StartTime  string    `json:"start_time" validate:"required"`
+	EndTime    string    `json:"end_time" validate:"required"`
+}
+
+type AppUsageEventForAnalysis struct {
+	AppName     string  `json:"app_name"`
+	WindowTitle string  `json:"window_title"`
+	DurationSec float64 `json:"duration_sec"`
+}
+
+type ActivityAnalysisResult struct {
+	EmployeeID           string                      `json:"employee_id"`
+	EmployeeName         string                      `json:"employee_name"`
+	ProjectName          string                      `json:"project_name,omitempty"`
+	WorkingApps          []string                    `json:"working_apps"`
+	TotalDurationSec     float64                     `json:"total_duration_sec"`
+	ProductiveDuration   float64                     `json:"productive_duration_sec"`
+	UnproductiveDuration float64                    `json:"unproductive_duration_sec"`
+	NeutralDuration      float64                     `json:"neutral_duration_sec"`
+	ProductivePct        float64                     `json:"productive_pct"`
+	UnproductivePct      float64                     `json:"unproductive_pct"`
+	NeutralPct           float64                     `json:"neutral_pct"`
+	Events               []ActivityEventClassification `json:"events"`
+	AIModel              string                      `json:"ai_model"`
+	AnalyzedAt           time.Time                   `json:"analyzed_at"`
+	StartTime            time.Time                   `json:"start_time"`
+	EndTime              time.Time                   `json:"end_time"`
+}
+
+type ActivityEventClassification struct {
+	AppName      string  `json:"app_name"`
+	WindowTitle  string  `json:"window_title"`
+	DurationSec  float64 `json:"duration_sec"`
+	Classification string `json:"classification"` // productive, unproductive, neutral
+	Reason        string  `json:"reason"`
 }

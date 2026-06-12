@@ -15,6 +15,7 @@ func SyncRules(
 	deviceRepo *postgres.DeviceRepo,
 	employeeRepo *postgres.EmployeeRepo,
 	companyRepo *postgres.CompanyRepo,
+	roleRepo *postgres.RoleRepo,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		deviceIDStr := r.URL.Query().Get("device_id")
@@ -42,13 +43,24 @@ func SyncRules(
 				ID:                uuid.New(),
 				TenantID:          uuid.Nil,
 				UploadInterval:    300,
-				ScreenshotEnabled: false,
+				ScreenshotEnabled: true,
 				ScreenshotPolicy:  "metadata_only",
 			},
 		}
 
 		employee, empErr := employeeRepo.GetByID(r.Context(), device.EmployeeID)
 		if empErr == nil && employee.RoleID != nil {
+			if role, err := roleRepo.GetByID(r.Context(), *employee.RoleID); err == nil {
+				rules.RoleInfo = &domain.RoleInfo{
+					ID:                role.ID,
+					Name:              role.Name,
+					Description:       role.Description,
+					WorkDescription:   role.WorkDescription,
+					AllowedCategories: role.AllowedCategories,
+					BlockedCategories: role.BlockedCategories,
+				}
+			}
+
 			if acs, err := appClassificationRepo.ListByRole(r.Context(), *employee.RoleID); err == nil {
 				rules.AppClassifications = acs
 			}

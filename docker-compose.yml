@@ -11,6 +11,7 @@ services:
       POSTGRES_PASSWORD: ainms_dev_password
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./backend/migrations/postgres:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ainms"]
       interval: 5s
@@ -47,7 +48,60 @@ services:
       timeout: 5s
       retries: 5
 
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8440:8440"
+    environment:
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8440
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=ainms
+      - POSTGRES_PASSWORD=ainms_dev_password
+      - POSTGRES_DB=ainms
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=ainms_minio
+      - MINIO_SECRET_KEY=ainms_minio_password
+      - MINIO_BUCKET=ainms-screenshots
+      - UPLOAD_DIR=public/screenshots
+    volumes:
+      - screenshots-data:/app/public/screenshots
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8440/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  admin:
+    build:
+      context: ./admin
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=http://localhost:8440
+    ports:
+      - "3440:3440"
+    environment:
+      - PORT=3440
+      - NEXT_PUBLIC_API_URL=http://localhost:8440
+    depends_on:
+      backend:
+        condition: service_healthy
+
 volumes:
   pgdata:
   redisdata:
   miniodata:
+  screenshots-data:

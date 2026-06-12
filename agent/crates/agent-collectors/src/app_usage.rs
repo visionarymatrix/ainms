@@ -61,21 +61,25 @@ impl AppUsageTracker {
         Self::new(5)
     }
 
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, TrackerState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn start(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         state.is_running = true;
         state.session_start = Local::now();
         state.last_sample_time = Instant::now();
     }
 
     pub fn stop(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         state.is_running = false;
         self.flush_current(&mut state);
     }
 
     pub fn sample(&self, window: &ActiveWindow) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         if !state.is_running {
             return;
         }
@@ -144,9 +148,9 @@ impl AppUsageTracker {
     }
 
     pub fn get_summary(&self) -> UsageSummary {
-        let state = self.state.lock().unwrap();
+        let state = self.lock_state();
         let mut apps: Vec<AppUsageEntry> = state.usage.values().cloned().collect();
-        apps.sort_by(|a, b| b.duration_secs.partial_cmp(&a.duration_secs).unwrap());
+        apps.sort_by(|a, b| b.duration_secs.partial_cmp(&a.duration_secs).unwrap_or(std::cmp::Ordering::Equal));
 
         UsageSummary {
             total_tracked_secs: apps.iter().map(|a| a.duration_secs).sum(),
@@ -157,15 +161,15 @@ impl AppUsageTracker {
     }
 
     pub fn get_current_app(&self) -> Option<String> {
-        self.state.lock().unwrap().current_app.clone()
+        self.lock_state().current_app.clone()
     }
 
     pub fn get_usage_for_app(&self, process_name: &str) -> Option<AppUsageEntry> {
-        self.state.lock().unwrap().usage.get(process_name).cloned()
+        self.lock_state().usage.get(process_name).cloned()
     }
 
     pub fn reset(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         state.usage.clear();
         state.current_app = None;
         state.session_start = Local::now();
@@ -173,7 +177,7 @@ impl AppUsageTracker {
     }
 
     pub fn is_running(&self) -> bool {
-        self.state.lock().unwrap().is_running
+        self.lock_state().is_running
     }
 
     pub fn spawn_sampler(self) -> Arc<Self> {
